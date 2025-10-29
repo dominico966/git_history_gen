@@ -19,5 +19,9 @@ export CHAINLIT_PORT=8080
 #    echo "requirements.txt not found. Skipping dependency installation."
 #fi
 
+# Install git if not installed
+sudo apt-get update
+sudo apt-get install git -y
+
 # Run Chainlit app
 python -m chainlit run src/chat_app.py
