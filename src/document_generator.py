@@ -9,6 +9,10 @@ import logging
 import asyncio
 import tempfile
 import shutil
+import os
+import json
+import hashlib
+from pathlib import Path
 from src.repo_cache import RepoCloneCache
 
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +33,10 @@ class DocumentGenerator:
         self.temp_dir = None
         self.is_remote = False
         self.use_cache = False  # 캐시 사용 여부
+        self.repo_path = repo_path
+
+        # 커밋 메타데이터 캐시 초기화
+        self._setup_commit_cache()
 
         try:
             # URL인지 확인
@@ -62,8 +70,64 @@ class DocumentGenerator:
             self._cleanup()
             raise
 
+    def _setup_commit_cache(self):
+        """커밋 메타데이터 캐시 디렉토리 설정"""
+        # 저장소별 캐시 키 생성
+        repo_hash = hashlib.md5(self.repo_path.encode()).hexdigest()[:12]
+
+        # 캐시 루트 디렉토리 결정
+        if 'REPO_CACHE_DIR' in os.environ:
+            cache_root = Path(os.environ['REPO_CACHE_DIR'])
+        elif os.path.exists('/home/site/wwwroot'):
+            home_dir = os.environ.get('HOME', '/home')
+            cache_root = Path(home_dir) / '.cache'
+        elif os.name == 'posix' and 'HOME' in os.environ:
+            cache_root = Path(os.environ['HOME']) / '.cache' / 'git_history_gen'
+        elif os.name == 'posix':
+            cache_root = Path(tempfile.gettempdir()) / 'git_history_gen_cache'
+        else:
+            project_root = Path(__file__).parent.parent.resolve()
+            cache_root = project_root / '.cache'
+
+        # 커밋 메타데이터 캐시 디렉토리
+        self.commit_cache_dir = cache_root / 'commits' / repo_hash
+        self.commit_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.commit_cache_file = self.commit_cache_dir / 'commits.json'
+
+        # 캐시 로드
+        self._commit_cache = {}
+        if self.commit_cache_file.exists():
+            try:
+                with open(self.commit_cache_file, 'r', encoding='utf-8') as f:
+                    self._commit_cache = json.load(f)
+                logger.info(f"Loaded {len(self._commit_cache)} cached commits for {repo_hash}")
+            except Exception as e:
+                logger.warning(f"Failed to load commit cache: {e}")
+                self._commit_cache = {}
+
+    def _save_commit_cache(self):
+        """커밋 메타데이터 캐시 저장"""
+        try:
+            with open(self.commit_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self._commit_cache, f, indent=2, ensure_ascii=False)
+            logger.debug(f"Saved {len(self._commit_cache)} commits to cache")
+        except Exception as e:
+            logger.error(f"Failed to save commit cache: {e}")
+
+    def _get_cached_commit(self, commit_sha: str) -> Optional[Dict]:
+        """캐시된 커밋 메타데이터 가져오기"""
+        return self._commit_cache.get(commit_sha)
+
+    def _cache_commit(self, commit_sha: str, commit_data: Dict):
+        """커밋 메타데이터 캐시"""
+        self._commit_cache[commit_sha] = commit_data
+
     def _cleanup(self):
         """임시 디렉토리 정리 (캐시 사용 시에는 정리하지 않음)"""
+        # 커밋 캐시 저장
+        if hasattr(self, '_commit_cache') and self._commit_cache:
+            self._save_commit_cache()
+
         # Git 저장소 닫기 (파일 핸들 해제)
         try:
             if hasattr(self, 'repo') and self.repo:
@@ -107,6 +171,8 @@ class DocumentGenerator:
         """
         try:
             commits = []
+            new_commits_count = 0
+            cached_commits_count = 0
 
             logger.info(f"Extracting commits from {branch} (limit: {limit}, since: {since}, until: {until}, skip: {skip})")
 
@@ -123,8 +189,19 @@ class DocumentGenerator:
 
             for idx, commit in enumerate(commit_list):
                 try:
+                    commit_sha = commit.hexsha
+
+                    # 캐시에서 먼저 확인
+                    cached_data = self._get_cached_commit(commit_sha)
+                    if cached_data:
+                        commits.append(cached_data)
+                        cached_commits_count += 1
+                        logger.debug(f"Using cached commit: {commit_sha[:8]}")
+                        continue
+
+                    # 캐시에 없으면 새로 생성
                     commit_data = {
-                        "id": commit.hexsha,
+                        "id": commit_sha,
                         "message": commit.message.strip(),
                         "author": commit.author.name,
                         "author_email": commit.author.email,
@@ -148,13 +225,20 @@ class DocumentGenerator:
                     else:
                         commit_data["relation_to_previous"] = None
 
+                    # 캐시에 저장
+                    self._cache_commit(commit_sha, commit_data)
                     commits.append(commit_data)
+                    new_commits_count += 1
 
                 except Exception as e:
                     logger.warning(f"Failed to process commit {commit.hexsha[:8]}: {e}")
                     continue
 
-            logger.info(f"✓ Extracted {len(commits)} commits with enhanced metadata")
+            # 주기적으로 캐시 저장 (메모리 절약)
+            if new_commits_count > 0:
+                self._save_commit_cache()
+
+            logger.info(f"✓ Extracted {len(commits)} commits (cached: {cached_commits_count}, new: {new_commits_count})")
             return commits
 
         except Exception as e:
@@ -361,8 +445,8 @@ class DocumentGenerator:
             context = {
                 "summary": "",
                 "impact_scope": [],
-                "change_types": set(),
-                "file_categories": defaultdict(int)
+                "change_types": [],
+                "file_categories": {}
             }
 
             if not commit.parents:
@@ -372,17 +456,20 @@ class DocumentGenerator:
             # 변경된 파일 분석
             diff = commit.parents[0].diff(commit)
 
+            change_types_set = set()
+            file_categories_dict = defaultdict(int)
+
             for item in diff:
                 file_path = item.a_path if item.a_path else item.b_path
 
                 # 변경 타입 수집
-                context["change_types"].add(item.change_type)
+                change_types_set.add(item.change_type)
 
                 # 파일 카테고리 분류
                 if file_path:
                     if '/' in file_path:
                         category = file_path.split('/')[0]
-                        context["file_categories"][category] += 1
+                        file_categories_dict[category] += 1
 
                     # 영향 범위 파악
                     if any(ext in file_path for ext in ['.py', '.js', '.ts', '.java', '.go', '.rs']):
@@ -398,14 +485,14 @@ class DocumentGenerator:
             change_type_names = {
                 'A': '추가', 'D': '삭제', 'M': '수정', 'R': '이름변경', 'T': '타입변경'
             }
-            types_str = ', '.join([change_type_names.get(t, t) for t in context["change_types"]])
+            types_str = ', '.join([change_type_names.get(t, t) for t in change_types_set])
 
-            total_files = sum(context["file_categories"].values())
+            total_files = sum(file_categories_dict.values())
             context["summary"] = f"{total_files}개 파일 {types_str}"
 
-            # set을 list로 변환 (JSON 직렬화 가능하도록)
-            context["change_types"] = list(context["change_types"])
-            context["file_categories"] = dict(context["file_categories"])
+            # set을 list로, defaultdict를 dict로 변환 (JSON 직렬화 가능하도록)
+            context["change_types"] = list(change_types_set)
+            context["file_categories"] = dict(file_categories_dict)
 
             return context
 

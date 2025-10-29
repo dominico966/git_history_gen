@@ -57,9 +57,11 @@ class RepoCloneCache:
         # Azure 환경에서 Git safe.directory 설정
         self._configure_git_safe_directory()
 
-        # 기존 캐시 메타데이터 로드 및 유효성 검사
+        # 기존 캐시 메타데이터 로드
         self._load_cache_metadata()
-        self._validate_and_cleanup_cache()
+
+        # 간단한 유효성 검사만 수행 (만료/손상된 캐시만 제거)
+        self._quick_validate_cache()
 
     def _get_cache_root(self) -> Path:
         """
@@ -175,8 +177,101 @@ class RepoCloneCache:
         except Exception as e:
             logger.error(f"Failed to save cache metadata: {e}")
 
+    def _quick_validate_cache(self):
+        """빠른 캐시 검증 (만료 및 경로 존재만 체크, fetch는 안함)"""
+        logger.info("Quick validating cache entries...")
+
+        invalid_keys = []
+        expired_keys = []
+        now = datetime.now()
+
+        for cache_key, entry in self._cache.items():
+            try:
+                cache_path = entry['path']
+                cache_path = self._normalize_cache_path(cache_path, cache_key)
+                entry['path'] = cache_path
+
+                created_at = datetime.fromisoformat(entry['created_at'])
+                repo_url = entry['url']
+
+                # 만료 확인
+                if now - created_at > timedelta(days=self._expire_days):
+                    logger.info(f"Cache expired: {repo_url}")
+                    expired_keys.append(cache_key)
+                    continue
+
+                # 경로 존재 확인만
+                if not os.path.exists(cache_path):
+                    logger.warning(f"Cache path not found: {cache_path}")
+                    invalid_keys.append(cache_key)
+                    continue
+
+                # Git 저장소 유효성만 확인 (fetch는 안함)
+                try:
+                    repo = git.Repo(cache_path)
+                    repo.close()
+                    logger.debug(f"✓ Valid cache entry: {repo_url}")
+                except Exception as e:
+                    logger.warning(f"Invalid git repository: {cache_path} - {e}")
+                    invalid_keys.append(cache_key)
+
+            except Exception as e:
+                logger.warning(f"Failed to validate cache entry {cache_key}: {e}")
+                invalid_keys.append(cache_key)
+
+        # 만료/손상된 캐시만 정리
+        removed_count = 0
+        for cache_key in expired_keys + invalid_keys:
+            self._invalidate_cache(cache_key)
+            removed_count += 1
+
+        if removed_count > 0:
+            logger.info(f"Cleaned up {removed_count} invalid/expired cache entries")
+            self._save_cache_metadata()
+        else:
+            logger.info("All cache entries are valid")
+
+    def _validate_single_repo(self, cache_key: str) -> bool:
+        """
+        특정 저장소의 캐시 유효성 검사 및 업데이트
+
+        Args:
+            cache_key: 캐시 키
+
+        Returns:
+            bool: 유효하면 True, 아니면 False
+        """
+        if cache_key not in self._cache:
+            return False
+
+        try:
+            entry = self._cache[cache_key]
+            cache_path = entry['path']
+            repo_url = entry['url']
+
+            # safe.directory 설정
+            self._add_safe_directory(cache_path)
+
+            # Git 저장소 유효성 확인 및 업데이트
+            repo = git.Repo(cache_path)
+            logger.info(f"Fetching latest changes for: {repo_url}")
+            origin = repo.remotes.origin
+            origin.fetch()
+            repo.git.reset('--hard', 'origin/HEAD')
+
+            # 마지막 접근 시간 업데이트
+            entry['last_accessed'] = datetime.now().isoformat()
+            self._save_cache_metadata()
+
+            logger.info(f"✓ Updated cache entry: {repo_url}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to validate cache entry {cache_key}: {e}")
+            return False
+
     def _validate_and_cleanup_cache(self):
-        """캐시 유효성 검사 및 만료/손상된 캐시 정리"""
+        """캐시 유효성 검사 및 만료/손상된 캐시 정리 (전체 검증 - 사용 안함)"""
         logger.info("Validating cache entries...")
 
         invalid_keys = []
@@ -437,28 +532,14 @@ class RepoCloneCache:
                 # 캐시된 경로가 유효한지 확인
                 if os.path.exists(cached_path):
                     try:
-                        # safe.directory 설정 (Azure 환경에서 필요)
-                        self._add_safe_directory(cached_path)
-
-                        # Git 저장소가 유효한지 확인
-                        repo = git.Repo(cached_path)
-
-                        # fetch로 최신 커밋 가져오기
-                        logger.info(f"Using cached repository: {repo_url}")
-                        logger.info(f"Fetching latest changes...")
-
-                        origin = repo.remotes.origin
-                        origin.fetch(depth=depth)
-
-                        # HEAD를 최신으로 업데이트
-                        repo.git.reset('--hard', 'origin/HEAD')
-
-                        # 마지막 접근 시간 업데이트
-                        entry['last_accessed'] = now.isoformat()
-                        self._save_cache_metadata()
-
-                        logger.info(f"✓ Cache hit and updated: {cached_path}")
-                        return cached_path
+                        # 이 저장소만 검증 및 업데이트
+                        if self._validate_single_repo(cache_key):
+                            logger.info(f"✓ Cache hit and updated: {cached_path}")
+                            return cached_path
+                        else:
+                            # 검증 실패 시 재클론
+                            logger.warning(f"Cache validation failed, will re-clone")
+                            self._invalidate_cache(cache_key)
 
                     except Exception as e:
                         logger.warning(f"Cached repo invalid, will re-clone: {e}")
