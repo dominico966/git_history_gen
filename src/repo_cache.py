@@ -42,9 +42,8 @@ class RepoCloneCache:
 
     def _initialize(self):
         """캐시 디렉토리 및 메타데이터 초기화"""
-        # 프로젝트 루트의 .cache 디렉토리 사용
-        project_root = Path(__file__).parent.parent.resolve()
-        cache_root = project_root / '.cache'
+        # Azure 환경 감지 및 적절한 캐시 디렉토리 설정
+        cache_root = self._get_cache_root()
         self._cache_dir = str(cache_root / 'repos')
         self._cache_file = str(cache_root / 'cache_metadata.json')
 
@@ -52,13 +51,106 @@ class RepoCloneCache:
         os.makedirs(self._cache_dir, exist_ok=True)
         os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
 
-        logger.info(f"Project root: {project_root}")
         logger.info(f"Cache root: {cache_root}")
         logger.info(f"Initialized repository cache at: {self._cache_dir}")
+
+        # Azure 환경에서 Git safe.directory 설정
+        self._configure_git_safe_directory()
 
         # 기존 캐시 메타데이터 로드 및 유효성 검사
         self._load_cache_metadata()
         self._validate_and_cleanup_cache()
+
+    def _get_cache_root(self) -> Path:
+        """
+        환경에 맞는 캐시 루트 디렉토리 결정
+
+        Returns:
+            Path: 캐시 루트 디렉토리
+        """
+        # 환경 변수로 캐시 디렉토리 명시적 지정 가능
+        if 'REPO_CACHE_DIR' in os.environ:
+            cache_dir = Path(os.environ['REPO_CACHE_DIR'])
+            logger.info(f"Using cache dir from REPO_CACHE_DIR: {cache_dir}")
+            return cache_dir
+
+        # Azure Web App 환경 감지
+        if os.path.exists('/home/site/wwwroot'):
+            # Azure에서는 HOME 환경변수 사용 (일반적으로 /home)
+            home_dir = os.environ.get('HOME', '/home')
+            cache_dir = Path(home_dir) / '.cache'
+            logger.info(f"Azure environment detected, HOME={home_dir}, using: {cache_dir}")
+            return cache_dir
+
+        # Linux 환경에서는 /tmp 사용 (선택적으로 영구 디렉토리)
+        if os.name == 'posix':
+            # 먼저 $HOME/.cache 시도 (영구적)
+            if 'HOME' in os.environ:
+                cache_dir = Path(os.environ['HOME']) / '.cache' / 'git_history_gen'
+                logger.info(f"Using HOME cache dir: {cache_dir}")
+                return cache_dir
+            # 그렇지 않으면 /tmp (재시작 시 삭제됨)
+            cache_dir = Path(tempfile.gettempdir()) / 'git_history_gen_cache'
+            logger.info(f"Using temp cache dir: {cache_dir}")
+            return cache_dir
+
+        # Windows나 기타 환경에서는 프로젝트 루트 사용
+        project_root = Path(__file__).parent.parent.resolve()
+        cache_dir = project_root / '.cache'
+        logger.info(f"Using project cache dir: {cache_dir}")
+        return cache_dir
+
+    def _configure_git_safe_directory(self):
+        """
+        Git safe.directory 설정 (Azure 환경 등에서 소유권 문제 방지)
+        """
+        try:
+            import subprocess
+
+            # 모든 디렉토리를 안전한 것으로 설정
+            result = subprocess.run(
+                ['git', 'config', '--global', '--add', 'safe.directory', '*'],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+
+            if result.returncode == 0:
+                logger.info("✓ Configured Git safe.directory for all repositories")
+            else:
+                logger.warning(f"Failed to configure safe.directory (non-critical): {result.stderr}")
+
+        except FileNotFoundError:
+            logger.warning("Git command not found, skipping safe.directory configuration")
+        except Exception as e:
+            logger.warning(f"Failed to configure safe.directory (non-critical): {e}")
+
+    def _add_safe_directory(self, repo_path: str):
+        """
+        특정 저장소 경로를 Git safe.directory에 추가
+
+        Args:
+            repo_path: 저장소 경로
+        """
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                ['git', 'config', '--global', '--add', 'safe.directory', repo_path],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+
+            if result.returncode == 0:
+                logger.info(f"✓ Added safe.directory: {repo_path}")
+            else:
+                logger.debug(f"Failed to add safe.directory (non-critical): {result.stderr}")
+
+        except FileNotFoundError:
+            logger.debug("Git command not found")
+        except Exception as e:
+            logger.debug(f"Failed to add safe.directory (non-critical): {e}")
 
     def _load_cache_metadata(self):
         """캐시 메타데이터를 JSON 파일에서 로드"""
@@ -345,6 +437,9 @@ class RepoCloneCache:
                 # 캐시된 경로가 유효한지 확인
                 if os.path.exists(cached_path):
                     try:
+                        # safe.directory 설정 (Azure 환경에서 필요)
+                        self._add_safe_directory(cached_path)
+
                         # Git 저장소가 유효한지 확인
                         repo = git.Repo(cached_path)
 
@@ -382,6 +477,10 @@ class RepoCloneCache:
                 try:
                     # Git 저장소인지 확인하고 pull 시도
                     logger.info(f"Attempting to use existing repo and pull...")
+
+                    # safe.directory 설정 (Azure 환경에서 필요)
+                    self._add_safe_directory(local_path)
+
                     existing_repo = git.Repo(local_path)
 
                     # remote origin 확인
@@ -461,6 +560,9 @@ class RepoCloneCache:
                 local_path,
                 **clone_kwargs
             )
+
+            # Azure 환경에서 safe.directory 설정 (클론 직후)
+            self._add_safe_directory(local_path)
 
             # 캐시 메타데이터 저장
             self._cache[cache_key] = {
