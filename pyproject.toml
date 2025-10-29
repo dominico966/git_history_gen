@@ -1,0 +1,18 @@
+[project]
+name = "git-history-gen"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "azure-identity>=1.25.1",
+    "azure-search-documents==11.6.0b12",
+    "chainlit>=2.8.3",
+    "debugpy>=1.8.17",
+    "dotenv>=0.9.9",
+    "GitPython>=3.1.40",
+    "openai>=2.6.1",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "streamlit>=1.50.0",
+]

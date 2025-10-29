@@ -1,0 +1,1367 @@
+"""
+Chainlit 기반 대화형 Git 히스토리 분석 채팅 앱
+프롬프트는 구조화된 객체로 관리하며 여러 줄 문자열(''' or \"\"\") 사용 금지
+"""
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+import chainlit as cl
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.tools import (
+    get_commit_summary,
+    search_commits,
+    analyze_contributors,
+    find_frequent_bug_commits,
+    get_commit_count
+)
+from src.online_reader import (
+    OnlineRepoReader,
+    read_file_from_commit,
+    get_file_context,
+    get_readme_content,
+    get_commit_diff
+)
+from src.indexer import CommitIndexer
+from azure.search.documents.indexes import SearchIndexClient
+from src.index_manager import IndexManager, format_index_statistics
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 안전 장치: 최대값 제한 (토큰/비용 폭탄 방지)
+MAX_COMMIT_LIMIT = int(os.getenv("MAX_COMMIT_LIMIT", "200"))
+MAX_SEARCH_TOP = int(os.getenv("MAX_SEARCH_TOP", "20"))
+MAX_CONTRIBUTOR_LIMIT = int(os.getenv("MAX_CONTRIBUTOR_LIMIT", "500"))
+DEFAULT_INDEX_LIMIT = int(os.getenv("DEFAULT_INDEX_LIMIT", "100"))
+
+# SocketIO 페이로드 제한
+MAX_TOOL_RESULT_DISPLAY = 300  # Step에 표시할 최대 문자 수
+MAX_TOOL_RESULT_TO_LLM = 2000  # LLM에 전달할 최대 문자 수
+MAX_CONVERSATION_MESSAGES = 8  # 시스템 프롬프트 + 최근 N개 메시지
+
+def get_system_prompt() -> str:
+    """현재 날짜를 포함한 시스템 프롬프트 생성"""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    default_limit = DEFAULT_INDEX_LIMIT
+
+    parts = [
+        "Git 저장소 커밋 히스토리 분석 전문가. 사용자 요청에 따라 적절한 도구를 선택하여 실행하고 결과를 분석한다.",
+        f"오늘 날짜: {today}",
+        "",
+        "# 기본 규칙",
+        "- 분석 결과는 한국어로 명확하고 구조화된 형태로 제공",
+        "- 저장소 경로: 로컬 경로, GitHub URL, 또는 짧은 이름 지원",
+        "- 사용자가 모호한 저장소 이름 제공 시 시스템이 자동으로 선택 UI 제공",
+        "- 검색은 영어만 가능. 다른 언어 요청 시 영어로 번역 후 검색",
+        "",
+        "# 사용자 확인 규칙 (중요)",
+        "- **절대로 텍스트로 사용자에게 예/아니오를 묻지 마라**",
+        "- 사용자 확인이 필요한 작업(인덱싱 등)은 도구를 바로 실행하라",
+        "- 시스템이 자동으로 UI 버튼(AskActionMessage)을 통해 사용자 확인을 받는다",
+        "- 너는 도구 결과를 받아서 분석만 하면 된다",
+        "",
+        "# 인덱싱 전략",
+        "1. 저장소 분석 요청 시: list_indexed_repositories로 인덱싱 여부 먼저 확인",
+        "2. 인덱싱 전: get_commit_count로 저장소 커밋 개수 확인 필수",
+        f"3. 자동 인덱싱 기본값: 최근 {default_limit}개 커밋",
+        "4. **증분 인덱싱**: 항상 HEAD(최신)부터 시작. skip_existing=true로 중복 방지",
+        "5. **과거 커밋 추가**: skip_offset 파라미터 사용",
+        "   - 예: 이미 100개 인덱싱 → skip_offset=100, limit=50으로 101~150번째 과거 커밋 추가",
+        "   - get_repository_info로 현재 인덱싱된 개수 확인 후 skip_offset 설정",
+        "6. 규모별 전략:",
+        "   - ~100 커밋: 기본값 이하로 적절히 제안",
+        "   - 100~500 커밋: 검색 결과 부족 시 skip_offset으로 과거 커밋 추가",
+        "   - 500+ 커밋: 날짜 범위(since/until) 활용 또는 사용자에게 범위 확인",
+        "",
+        "# 도구 사용 규칙",
+        "- search_commits: 미인덱싱 시 시스템이 자동으로 UI 버튼으로 사용자 확인",
+        "- index_repository: 시스템이 자동으로 UI 버튼으로 사용자 확인 (대용량 인덱싱 시)",
+        "- get_commit_summary: 로컬 분석. 인덱싱 없이 사용 가능",
+        "- 날짜 필터: ISO 8601 형식 (YYYY-MM-DD) 사용",
+        "",
+        "# 응답 스타일 (중요)",
+        "- **도구 실행 후 반드시 결과를 사용자에게 설명하라**",
+        "- 도구 결과를 받으면 즉시 분석하고 요약하여 답변",
+        "- 인덱싱, 검색 등 완료 후 결과를 명확하게 제시",
+        "- '~하시겠습니까?', '~할까요?' 등 확인 질문 금지",
+        "- 간결하고 구조화된 형태로 답변 (마크다운 활용)",
+    ]
+    return "\n".join(parts)
+
+AVAILABLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_commit_count",
+            "description": "저장소의 총 커밋 개수를 빠르게 확인합니다. 날짜 범위를 지정하여 특정 기간의 커밋만 셀 수 있습니다. 인덱싱 전에 저장소 규모를 파악할 때 유용합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로 (로컬 경로 또는 GitHub URL)"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "시작 날짜 (ISO 8601 형식, 예: 2024-01-01). 이 날짜 이후의 커밋만 셉니다."
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "종료 날짜 (ISO 8601 형식, 예: 2024-12-31). 이 날짜 이전의 커밋만 셉니다."
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_commit_summary",
+            "description": "Git 저장소의 최근 커밋들을 요약합니다. 최근 변경사항, 주요 기여자, 트렌드를 분석합니다. 로컬 Git 히스토리에서 직접 읽어옵니다. 더 정밀한 검색이 필요하면 저장소를 인덱싱한 후 search_commits를 사용하세요.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로 (로컬 경로 또는 GitHub URL)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "분석할 커밋 수 (기본값: 50)",
+                        "default": 50
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_commits",
+            "description": "자연어 쿼리로 커밋을 검색합니다. 특정 기능, 버그, 파일 등과 관련된 커밋을 찾을 수 있습니다. 인덱싱되지 않은 저장소의 경우 시스템이 자동으로 사용자에게 확인을 요청합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색 쿼리 (자연어)"
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "반환할 최대 결과 수 (기본값: 10)",
+                        "default": 10
+                    },
+                    "repo_path": {
+                        "type": "string",
+                        "description": "특정 저장소만 검색 (선택적)"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_contributors",
+            "description": "기여자별 활동을 분석합니다. 커밋 수, 변경 라인 수, 최근 활동 등을 제공합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로"
+                    },
+                    "criteria": {
+                        "type": "string",
+                        "description": "평가 기준 (선택적, 기본값: 커밋 수, 변경 라인 수)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "분석할 커밋 수 (선택적)"
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_bug_commits",
+            "description": "버그 수정과 관련된 커밋을 찾습니다. 커밋 메시지에서 'fix', 'bug', 'issue' 등의 키워드를 탐지합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "분석할 커밋 수 (기본값: 200)",
+                        "default": 200
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_github_repo",
+            "description": "GitHub에서 저장소를 검색합니다. 키워드로 관련 저장소를 찾을 수 있습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색 키워드"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "최대 결과 수 (기본값: 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file_from_commit",
+            "description": "특정 커밋에서 파일 내용을 읽습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로"
+                    },
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "커밋 해시"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "파일 경로"
+                    }
+                },
+                "required": ["repo_path", "commit_sha", "file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_file_context",
+            "description": "커밋에서 변경된 파일의 주변 컨텍스트와 diff를 가져옵니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로"
+                    },
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "커밋 해시"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "파일 경로"
+                    }
+                },
+                "required": ["repo_path", "commit_sha", "file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_commit_diff",
+            "description": "특정 커밋의 전체 변경사항(diff)을 가져옵니다. 어떤 파일이 어떻게 변경되었는지 한눈에 볼 수 있습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로"
+                    },
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "커밋 해시 또는 커밋 ID"
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "표시할 최대 파일 수 (기본값: 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["repo_path", "commit_sha"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_readme",
+            "description": "저장소의 README 파일 내용을 가져옵니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로"
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_current_repository",
+            "description": "현재 작업할 저장소를 설정합니다. 이후 다른 도구 호출 시 이 저장소가 기본값으로 사용됩니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로 (로컬 경로 또는 GitHub URL)"
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "index_repository",
+            "description": "Git 저장소를 Azure AI Search에 인덱싱합니다. skip_offset을 사용하면 이미 인덱싱된 커밋 이후의 과거 커밋을 추가할 수 있습니다. 예: 이미 100개 인덱싱 → skip_offset=100, limit=50으로 101~150번째 커밋 추가 가능.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "Git 저장소 경로 (로컬 경로 또는 GitHub URL)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "인덱싱할 최대 커밋 수 (선택적)"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "시작 날짜 ISO 8601 형식 (선택적, 예: 2024-01-01)"
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "종료 날짜 ISO 8601 형식 (선택적, 예: 2024-12-31)"
+                    },
+                    "skip_existing": {
+                        "type": "boolean",
+                        "description": "이미 인덱싱된 커밋 건너뛰기 (기본값: true)",
+                        "default": True
+                    },
+                    "skip_offset": {
+                        "type": "integer",
+                        "description": "HEAD부터 건너뛸 커밋 수 (과거 커밋 추가 시, 기본값: 0)",
+                        "default": 0
+                    }
+                },
+                "required": ["repo_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_index_statistics",
+            "description": "인덱스 통계 정보를 조회합니다. 총 커밋 수, 저장소 수, 기여자 수, 날짜 범위 등을 확인할 수 있습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_indexed_repositories",
+            "description": "인덱싱된 저장소 목록을 조회합니다. 각 저장소의 커밋 수도 함께 제공합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_repository_info",
+            "description": "특정 저장소의 상세 정보를 조회합니다. 커밋 수, 기여자 수, 날짜 범위 등을 확인할 수 있습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_id": {
+                        "type": "string",
+                        "description": "저장소 식별자 (16자리 해시)"
+                    }
+                },
+                "required": ["repo_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_repository_commits",
+            "description": "특정 저장소의 모든 커밋을 인덱스에서 삭제합니다. 주의: 복구할 수 없습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_id": {
+                        "type": "string",
+                        "description": "저장소 식별자 (16자리 해시)"
+                    }
+                },
+                "required": ["repo_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_index_health",
+            "description": "인덱스 상태를 확인합니다. 인덱스가 정상적으로 작동하는지 검증합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_commits_by_date",
+            "description": "날짜 범위로 인덱싱된 커밋을 조회합니다. 특정 기간의 커밋 활동을 확인할 수 있습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "description": "시작 날짜 (ISO 8601 형식, 예: 2024-01-01)"
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "종료 날짜 (ISO 8601 형식, 예: 2024-12-31)"
+                    },
+                    "repo_path": {
+                        "type": "string",
+                        "description": "특정 저장소만 조회 (선택적)"
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "반환할 최대 결과 수 (기본값: 50)",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
+        }
+    }
+]
+
+
+def initialize_clients() -> tuple[AzureOpenAI, SearchClient, SearchIndexClient]:
+    """Azure OpenAI, Search, IndexClient 초기화"""
+    try:
+        openai_client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+
+        search_credential = AzureKeyCredential(os.getenv("AZURE_SEARCH_API_KEY"))
+
+        search_client = SearchClient(
+            endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+            index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
+            credential=search_credential
+        )
+
+        index_client = SearchIndexClient(
+            endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+            credential=search_credential
+        )
+
+        logger.info("Clients initialized successfully")
+        return openai_client, search_client, index_client
+
+    except Exception as e:
+        logger.error(f"Failed to initialize clients: {e}")
+        raise
+
+
+async def resolve_repository_ambiguity(
+    repo_hint: str,
+    search_client: SearchClient,
+    index_client: SearchIndexClient
+) -> Optional[str]:
+    """모호한 저장소 입력을 해결하여 정확한 경로 반환. 실패 시 None 반환"""
+    from src.index_manager import IndexManager
+
+    index_manager = IndexManager(
+        search_client=search_client,
+        index_client=index_client,
+        index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+    )
+
+    # 인덱싱된 모든 저장소 가져오기
+    repos = index_manager.list_indexed_repositories()
+
+    if not repos:
+        return None
+
+    # repo_hint로 필터링 (부분 일치)
+    matching_repos = [
+        r for r in repos
+        if repo_hint.lower() in r['repository_path'].lower()
+    ]
+
+    if len(matching_repos) == 0:
+        return None
+    elif len(matching_repos) == 1:
+        return matching_repos[0]['repository_path']
+    else:
+        # 여러 개 발견 - 사용자에게 선택 요청
+        options_text = "🔍 여러 저장소가 발견되었습니다. 선택해주세요:\n\n"
+        for i, repo in enumerate(matching_repos, 1):
+            options_text += f"{i}. {repo['repository_path']} ({repo['commit_count']}개 커밋)\n"
+        options_text += f"\n1-{len(matching_repos)} 사이의 숫자를 입력하세요:"
+
+        res = await cl.AskUserMessage(
+            content=options_text,
+            timeout=60,
+            raise_on_timeout=False
+        ).send()
+
+        if not res or not res.get("output"):
+            logger.info("User timeout or cancelled repository selection")
+            return None
+
+        try:
+            choice = int(res.get("output").strip())
+            if 1 <= choice <= len(matching_repos):
+                selected = matching_repos[choice - 1]['repository_path']
+                await cl.Message(content=f"✅ 선택된 저장소: `{selected}`").send()
+                return selected
+            else:
+                await cl.Message(content=f"❌ 유효하지 않은 번호입니다. 1-{len(matching_repos)} 사이의 숫자를 입력해주세요.").send()
+                return None
+        except ValueError:
+            await cl.Message(content="❌ 숫자를 입력해주세요.").send()
+            return None
+
+
+async def execute_tool(
+    tool_name: str,
+    arguments: Dict[str, Any],
+    openai_client: AzureOpenAI,
+    search_client: SearchClient,
+    index_client: SearchIndexClient
+) -> str:
+    """도구 실행"""
+    try:
+        logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+
+        # repo_path가 없고 current_repository가 설정되어 있으면 자동 적용
+        current_repo = cl.user_session.get("current_repository")
+        if "repo_path" in arguments and not arguments.get("repo_path") and current_repo:
+            arguments["repo_path"] = current_repo
+            logger.info(f"Using current repository: {current_repo}")
+        elif "repo_path" not in arguments and current_repo and tool_name not in ["search_github_repo"]:
+            arguments["repo_path"] = current_repo
+            logger.info(f"Auto-applying current repository: {current_repo}")
+
+        # 저장소 경로 모호성 해결 (짧은 이름이나 부분 경로인 경우)
+        if "repo_path" in arguments and arguments.get("repo_path"):
+            repo_path = arguments["repo_path"]
+            # 절대 경로가 아니고 짧은 이름인 경우 (예: "project1", "myrepo")
+            if not (repo_path.startswith("/") or repo_path.startswith("C:") or
+                    repo_path.startswith("http://") or repo_path.startswith("https://")):
+                logger.info(f"Ambiguous repository hint detected: {repo_path}")
+                resolved_path = await resolve_repository_ambiguity(
+                    repo_hint=repo_path,
+                    search_client=search_client,
+                    index_client=index_client
+                )
+                if resolved_path:
+                    arguments["repo_path"] = resolved_path
+                    logger.info(f"Resolved to: {resolved_path}")
+                elif resolved_path is None:
+                    return f"❌ '{repo_path}'와 일치하는 인덱싱된 저장소를 찾을 수 없습니다. 정확한 경로를 입력하거나 먼저 저장소를 인덱싱해주세요."
+
+        # 안전 장치: 최대값 제한 적용
+        if "limit" in arguments and arguments["limit"]:
+            if arguments["limit"] > MAX_COMMIT_LIMIT:
+                logger.warning(f"Limit {arguments['limit']} exceeds max {MAX_COMMIT_LIMIT}, capping")
+                arguments["limit"] = MAX_COMMIT_LIMIT
+
+        if "top" in arguments and arguments["top"]:
+            if arguments["top"] > MAX_SEARCH_TOP:
+                logger.warning(f"Top {arguments['top']} exceeds max {MAX_SEARCH_TOP}, capping")
+                arguments["top"] = MAX_SEARCH_TOP
+
+        if tool_name == "get_commit_count":
+            result = get_commit_count(
+                repo_path=arguments["repo_path"],
+                since=arguments.get("since"),
+                until=arguments.get("until")
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        elif tool_name == "get_commit_summary":
+            result = get_commit_summary(
+                repo_path=arguments["repo_path"],
+                llm_client=openai_client,
+                limit=arguments.get("limit", 50)
+            )
+            return result
+
+        elif tool_name == "search_commits":
+            # 저장소 경로가 지정된 경우 자동 인덱싱 확인
+            repo_path = arguments.get("repo_path")
+            if repo_path:
+                from src.indexer import normalize_repo_identifier
+                repo_id = normalize_repo_identifier(repo_path)
+
+                # 해당 저장소가 인덱싱되어 있는지 확인
+                try:
+                    check_results = search_client.search(
+                        search_text="*",
+                        filter=f"repo_id eq '{repo_id}'",
+                        select=["id"],
+                        top=1
+                    )
+                    has_indexed = len(list(check_results)) > 0
+
+                    if not has_indexed:
+                        logger.info(f"Repository not indexed, asking user permission: {repo_path}")
+
+                        # 커밋 개수 먼저 확인
+                        commit_info = get_commit_count(repo_path)
+                        total_commits = commit_info.get("commit_count", 0)
+                        is_error = "error" in commit_info
+
+                        if is_error:
+                            commit_info_text = "**총 커밋 수**: 확인 불가"
+                        else:
+                            commit_info_text = f"**총 커밋 수**: {total_commits:,}개"
+
+                        # 사용자에게 인덱싱 허락 받기 (UI 버튼)
+                        res = await cl.AskActionMessage(
+                            content=f"🔍 검색을 위해 저장소를 인덱싱해야 합니다.\n\n**저장소**: `{repo_path}`\n{commit_info_text}\n**인덱싱 예정**: 최근 {DEFAULT_INDEX_LIMIT}개 커밋\n\n인덱싱을 진행하시겠습니까?",
+                            actions=[
+                                cl.Action(name="yes", payload={"action": "yes"}, label="✅ 예, 인덱싱 시작"),
+                                cl.Action(name="no", payload={"action": "no"}, label="❌ 아니오, 취소"),
+                            ],
+                            timeout=120,  # 2분
+                            raise_on_timeout=False
+                        ).send()
+
+                        if not res:
+                            logger.info(f"User timeout for indexing: {repo_path}")
+                            return "⏱️ 시간 초과. 인덱싱을 취소했습니다. 다시 시도하려면 검색을 다시 요청해주세요."
+
+                        if res.get("payload", {}).get("action") == "yes":
+                            # 인덱싱 시작 알림
+                            await cl.Message(content="⏳ 인덱싱을 시작합니다...").send()
+
+                            # 자동 인덱싱 실행
+                            indexer = CommitIndexer(
+                                search_client=search_client,
+                                index_client=index_client,
+                                openai_client=openai_client,
+                                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+                            )
+                            indexer.create_index_if_not_exists()
+
+                            indexed_count = indexer.index_repository(
+                                repo_path=repo_path,
+                                limit=DEFAULT_INDEX_LIMIT,
+                                skip_existing=True
+                            )
+
+                            logger.info(f"User approved, indexed {indexed_count} commits for {repo_path}")
+
+                            # 인덱싱 완료 메시지 (Step 외부에 명확히 표시)
+                            if indexed_count == 0:
+                                await cl.Message(content="✅ **인덱싱 완료**\n\n저장소가 이미 인덱싱되어 있습니다. 검색을 계속 진행합니다.").send()
+                                # 검색을 계속 진행하도록 pass through
+                            else:
+                                await cl.Message(content=f"✅ **인덱싱 완료**\n\n{indexed_count}개 커밋이 인덱싱되었습니다.\n검색을 계속 진행합니다...").send()
+                                # 검색을 계속 진행하도록 pass through
+                        else:
+                            logger.info(f"User declined indexing for {repo_path}")
+                            return "❌ 사용자가 인덱싱을 취소했습니다. 검색을 수행할 수 없습니다."
+
+                except Exception as e:
+                    logger.warning(f"Failed to check indexing status: {e}")
+
+            # 검색 실행
+            results = search_commits(
+                query=arguments["query"],
+                search_client=search_client,
+                openai_client=openai_client,
+                top=arguments.get("top", 10),
+                repo_path=repo_path
+            )
+
+            # 결과 요약 (페이로드 크기 제한)
+            if isinstance(results, list) and len(results) > 0:
+                summary = f"검색 결과: {len(results)}개 커밋 발견\n\n"
+                for i, r in enumerate(results[:10], 1):  # 최대 10개만
+                    summary += f"{i}. {r.get('message', 'N/A')[:100]}... (by {r.get('author', 'N/A')})\n"
+                if len(results) > 10:
+                    summary += f"\n...외 {len(results)-10}개 커밋"
+                return summary
+            return json.dumps(results, ensure_ascii=False, indent=2)
+
+        elif tool_name == "analyze_contributors":
+            # limit 기본값 설정 (없으면 500으로 제한)
+            contributor_limit = arguments.get("limit", 500)
+            if contributor_limit > MAX_CONTRIBUTOR_LIMIT:
+                contributor_limit = MAX_CONTRIBUTOR_LIMIT
+
+            result = analyze_contributors(
+                repo_path=arguments["repo_path"],
+                criteria=arguments.get("criteria"),
+                limit=contributor_limit
+            )
+
+            # 결과 요약
+            if isinstance(result, dict) and 'contributors' in result:
+                contributors = result['contributors']
+                summary = f"👥 기여자 분석 결과: 총 {len(contributors)}명\n\n"
+                for i, c in enumerate(contributors[:10], 1):  # 최대 10명
+                    summary += f"{i}. {c.get('name', 'N/A')}: {c.get('commit_count', 0)}개 커밋\n"
+                if len(contributors) > 10:
+                    summary += f"\n...외 {len(contributors)-10}명"
+                return summary
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        elif tool_name == "find_bug_commits":
+            results = find_frequent_bug_commits(
+                repo_path=arguments["repo_path"],
+                llm_client=openai_client,
+                limit=arguments.get("limit", 200)
+            )
+
+            # 결과 요약
+            if isinstance(results, list) and len(results) > 0:
+                summary = f"🐛 버그 수정 커밋: {len(results)}개 발견\n\n"
+                for i, r in enumerate(results[:10], 1):  # 최대 10개
+                    summary += f"{i}. {r.get('message', 'N/A')[:80]}... (by {r.get('author', 'N/A')})\n"
+                if len(results) > 10:
+                    summary += f"\n...외 {len(results)-10}개 커밋"
+                return summary
+            return json.dumps(results, ensure_ascii=False, indent=2)
+
+        elif tool_name == "search_github_repo":
+            reader = OnlineRepoReader()
+            results = reader.search_github_repo(
+                query=arguments["query"],
+                max_results=arguments.get("max_results", 5)
+            )
+            return json.dumps(results, ensure_ascii=False, indent=2)
+
+        elif tool_name == "read_file_from_commit":
+            content = read_file_from_commit(
+                repo_path=arguments["repo_path"],
+                commit_sha=arguments["commit_sha"],
+                file_path=arguments["file_path"]
+            )
+            return content if content else "파일을 읽을 수 없습니다."
+
+        elif tool_name == "get_file_context":
+            context = get_file_context(
+                repo_path=arguments["repo_path"],
+                commit_sha=arguments["commit_sha"],
+                file_path=arguments["file_path"]
+            )
+            return json.dumps(context, ensure_ascii=False, indent=2)
+
+        elif tool_name == "get_commit_diff":
+            diff_info = get_commit_diff(
+                repo_path=arguments["repo_path"],
+                commit_sha=arguments["commit_sha"],
+                max_files=arguments.get("max_files", 10)
+            )
+            if diff_info:
+                return json.dumps(diff_info, ensure_ascii=False, indent=2)
+            else:
+                return "커밋 diff를 가져올 수 없습니다."
+
+        elif tool_name == "get_readme":
+            content = get_readme_content(arguments["repo_path"])
+            return content if content else "README 파일을 찾을 수 없습니다."
+
+        elif tool_name == "set_current_repository":
+            repo_path = arguments["repo_path"]
+            cl.user_session.set("current_repository", repo_path)
+            logger.info(f"Current repository set to: {repo_path}")
+            return f"현재 저장소를 '{repo_path}'로 설정했습니다. 이제 저장소 경로를 생략하면 이 저장소가 사용됩니다."
+
+        elif tool_name == "index_repository":
+            indexer = CommitIndexer(
+                search_client=search_client,
+                index_client=index_client,
+                openai_client=openai_client,
+                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+            )
+
+            # 인덱스 생성 (없으면)
+            indexer.create_index_if_not_exists()
+
+            # limit이 없으면 DEFAULT_INDEX_LIMIT 사용
+            index_limit = arguments.get("limit")
+            if index_limit is None:
+                logger.warning(f"No limit specified for indexing, defaulting to {DEFAULT_INDEX_LIMIT}")
+                index_limit = DEFAULT_INDEX_LIMIT
+            elif index_limit > MAX_COMMIT_LIMIT:
+                logger.warning(f"Index limit {index_limit} exceeds max, capping to {MAX_COMMIT_LIMIT}")
+                index_limit = MAX_COMMIT_LIMIT
+
+            # 대용량 인덱싱(DEFAULT_INDEX_LIMIT개 이상)이면 사용자 확인
+            if index_limit >= DEFAULT_INDEX_LIMIT:
+                since_param = arguments.get("since", "")
+                until_param = arguments.get("until", "")
+                date_info = ""
+                if since_param or until_param:
+                    date_info = f"\n**날짜 범위**: {since_param or '시작'} ~ {until_param or '끝'}"
+
+                res = await cl.AskActionMessage(
+                    content=f"⚠️ 대용량 인덱싱 요청\n\n**저장소**: {arguments['repo_path']}\n**인덱싱 예정**: {index_limit}개 커밋{date_info}\n\n진행 방법을 선택하세요:",
+                    actions=[
+                        cl.Action(name="proceed", payload={"action": "proceed"}, label="✅ 그대로 진행"),
+                        cl.Action(name="custom", payload={"action": "custom"}, label="✏️ 개수/날짜 변경"),
+                        cl.Action(name="cancel", payload={"action": "cancel"}, label="❌ 취소"),
+                    ],
+                    timeout=120,  # 2분
+                    raise_on_timeout=False
+                ).send()
+
+                if not res:
+                    logger.info(f"User timeout for large indexing: {index_limit} commits")
+                    return f"❌ 시간 초과. 인덱싱을 취소했습니다."
+
+                action = res.get("payload", {}).get("action")
+
+                if action == "proceed":
+                    await cl.Message(content=f"✅ 사용자 승인됨. {index_limit}개 커밋 인덱싱을 시작합니다...").send()
+
+                elif action == "custom":
+                    # 사용자 정의 개수 입력 받기
+                    custom_limit_res = await cl.AskUserMessage(
+                        content=f"📝 인덱싱할 커밋 개수를 입력하세요 (최대 {MAX_COMMIT_LIMIT}개):",
+                        timeout=60,
+                        raise_on_timeout=False
+                    ).send()
+
+                    if not custom_limit_res:
+                        return "⏱️ 시간 초과. 인덱싱을 취소했습니다."
+
+                    if custom_limit_res.get("output"):
+                        try:
+                            custom_limit = int(custom_limit_res.get("output").strip())
+                            if 1 <= custom_limit <= MAX_COMMIT_LIMIT:
+                                index_limit = custom_limit
+                            else:
+                                return f"❌ 유효하지 않은 개수입니다. 1~{MAX_COMMIT_LIMIT} 사이의 값을 입력해주세요."
+                        except ValueError:
+                            return f"❌ 숫자를 입력해주세요."
+
+                    # 날짜 범위 입력 받기
+                    date_res = await cl.AskUserMessage(
+                        content="📅 날짜 범위를 입력하세요 (형식: YYYY-MM-DD,YYYY-MM-DD 또는 빈칸으로 건너뛰기):\n\n예: 2024-01-01,2024-12-31",
+                        timeout=60,
+                        raise_on_timeout=False
+                    ).send()
+
+                    if date_res and date_res.get("output") and date_res.get("output").strip():
+                        date_input = date_res.get("output").strip()
+                        if "," in date_input:
+                            parts = date_input.split(",")
+                            if len(parts) == 2:
+                                arguments["since"] = parts[0].strip() or None
+                                arguments["until"] = parts[1].strip() or None
+
+                    await cl.Message(content=f"✅ 설정 완료. {index_limit}개 커밋 인덱싱을 시작합니다...").send()
+
+                else:  # cancel
+                    logger.info(f"User declined large indexing: {index_limit} commits")
+                    return f"❌ 사용자가 대용량 인덱싱을 취소했습니다. 더 작은 범위로 다시 시도하거나 날짜 범위를 지정해주세요."
+
+            # 저장소 인덱싱
+            indexed_count = indexer.index_repository(
+                repo_path=arguments["repo_path"],
+                limit=index_limit,
+                since=arguments.get("since"),
+                until=arguments.get("until"),
+                skip_existing=arguments.get("skip_existing", True),
+                skip_offset=arguments.get("skip_offset", 0)
+            )
+
+            # 인덱싱 완료 메시지를 Step 외부에 명확히 표시
+            if indexed_count == 0:
+                logger.info(f"Repository already indexed: {arguments['repo_path']}")
+                await cl.Message(content=f"✅ **인덱싱 확인 완료**\n\n저장소가 이미 인덱싱되어 있습니다.\n저장소: `{arguments['repo_path']}`").send()
+                return f"저장소가 이미 인덱싱되어 있습니다. 검색 및 분석을 바로 시작할 수 있습니다."
+            else:
+                await cl.Message(content=f"✅ **인덱싱 완료**\n\n{indexed_count:,}개의 커밋이 성공적으로 인덱싱되었습니다.\n저장소: `{arguments['repo_path']}`").send()
+                return f"{indexed_count}개 커밋이 인덱싱되었습니다. 이제 검색, 분석 등 모든 기능을 사용할 수 있습니다."
+
+        elif tool_name == "get_index_statistics":
+            index_manager = IndexManager(
+                search_client=search_client,
+                index_client=index_client,
+                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+            )
+            stats = index_manager.get_index_statistics()
+            formatted = format_index_statistics(stats)
+            return formatted
+
+        elif tool_name == "list_indexed_repositories":
+            index_manager = IndexManager(
+                search_client=search_client,
+                index_client=index_client,
+                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+            )
+            repos = index_manager.list_indexed_repositories()
+
+            if not repos:
+                return "인덱싱된 저장소가 없습니다."
+
+            result_lines = ["📁 **인덱싱된 저장소 목록**", ""]
+            for repo in repos:
+                result_lines.append(
+                    f"- **{repo['repository_path']}**\n"
+                    f"  - Repo ID: `{repo['repo_id']}`\n"
+                    f"  - 커밋 수: {repo['commit_count']}"
+                )
+
+            return "\n".join(result_lines)
+
+        elif tool_name == "get_repository_info":
+            index_manager = IndexManager(
+                search_client=search_client,
+                index_client=index_client,
+                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+            )
+            info = index_manager.get_repository_info(arguments["repo_id"])
+
+            if not info:
+                return f"저장소 정보를 찾을 수 없습니다: {arguments['repo_id']}"
+
+            # 구조화된 프롬프트로 결과 생성
+            result_parts = [
+                "📊 **저장소 정보**",
+                "",
+                f"**경로**: {info['repository_path']}",
+                f"**Repo ID**: `{info['repo_id']}`",
+                f"**커밋 수**: {info['commit_count']:,}",
+                f"**기여자 수**: {info['author_count']}",
+                "",
+                "**날짜 범위**:",
+                f"- 가장 오래된 커밋: {info['date_range']['oldest'] or 'N/A'}",
+                f"- 가장 최근 커밋: {info['date_range']['newest'] or 'N/A'}"
+            ]
+            return "\n".join(result_parts)
+
+        elif tool_name == "delete_repository_commits":
+            index_manager = IndexManager(
+                search_client=search_client,
+                index_client=index_client,
+                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+            )
+            deleted_count = index_manager.delete_repository_commits(arguments["repo_id"])
+            return f"✓ {deleted_count}개 커밋이 삭제되었습니다. (Repo ID: {arguments['repo_id']})"
+
+        elif tool_name == "check_index_health":
+            index_manager = IndexManager(
+                search_client=search_client,
+                index_client=index_client,
+                index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
+            )
+            health = index_manager.check_index_health()
+
+            status_emoji = "✅" if health["status"] == "healthy" else "⚠️" if health["status"] == "degraded" else "❌"
+
+            # 구조화된 프롬프트로 결과 생성
+            result_parts = [
+                f"{status_emoji} **인덱스 상태: {health['status']}**",
+                "",
+                f"**인덱스 이름**: {health.get('index_name', 'N/A')}",
+                f"**인덱스 존재**: {'✓' if health.get('index_exists') else '✗'}",
+                f"**총 문서 수**: {health.get('total_documents', 0):,}",
+                f"**검색 기능**: {'정상' if health.get('search_works') else '오류'}"
+            ]
+
+            if "message" in health:
+                result_parts.append("")
+                result_parts.append(f"**메시지**: {health['message']}")
+
+            return "\n".join(result_parts)
+
+        elif tool_name == "search_commits_by_date":
+            # 날짜 범위로 커밋 조회
+            repo_path = arguments.get("repo_path")
+            since = arguments.get("since")
+            until = arguments.get("until")
+            top = arguments.get("top", 50)
+
+            # 필터 구성
+            filters = []
+
+            if repo_path:
+                from src.indexer import normalize_repo_identifier
+                repo_id = normalize_repo_identifier(repo_path)
+                filters.append(f"repo_id eq '{repo_id}'")
+
+            if since:
+                filters.append(f"date ge {since}T00:00:00Z")
+
+            if until:
+                filters.append(f"date le {until}T23:59:59Z")
+
+            filter_expr = " and ".join(filters) if filters else None
+
+            try:
+                results = search_client.search(
+                    search_text="*",
+                    filter=filter_expr,
+                    select=["id", "message", "author", "date", "files_summary", "repository_path"],
+                    order_by=["date desc"],
+                    top=min(top, MAX_SEARCH_TOP)
+                )
+
+                commits = []
+                for result in results:
+                    commits.append({
+                        "commit_id": result.get("id", ""),
+                        "message": result.get("message", ""),
+                        "author": result.get("author", ""),
+                        "date": result.get("date", ""),
+                        "files": result.get("files_summary", ""),
+                        "repository": result.get("repository_path", "")
+                    })
+
+                if not commits:
+                    return f"해당 기간에 인덱싱된 커밋이 없습니다. (since: {since or '제한없음'}, until: {until or '제한없음'})"
+
+                # 결과 요약 (페이로드 크기 제한)
+                summary = f"📅 날짜 범위 검색 결과: {len(commits)}개 커밋\n"
+                summary += f"기간: {since or '시작'} ~ {until or '현재'}\n\n"
+                for i, c in enumerate(commits[:10], 1):  # 최대 10개만
+                    summary += f"{i}. {c['message'][:80]}... (by {c['author']}, {c['date'][:10]})\n"
+                if len(commits) > 10:
+                    summary += f"\n...외 {len(commits)-10}개 커밋"
+                return summary
+
+            except Exception as e:
+                logger.error(f"Failed to search commits by date: {e}")
+                return f"날짜 범위 조회 중 오류 발생: {str(e)}"
+
+        else:
+            return f"알 수 없는 도구: {tool_name}"
+
+    except Exception as e:
+        logger.error(f"Tool execution error: {e}")
+        return f"도구 실행 중 오류 발생: {str(e)}"
+
+
+@cl.set_starters
+async def set_starters():
+    """초기 시작 화면에 표시할 스타터 제안 - Chainlit starters 기능
+
+    Icons8 MCP를 통해 전문적인 아이콘 적용:
+    - Database (1476): 저장소 인덱싱
+    - Commit Git (33279): 커밋 요약
+    - Users/Group (102261): 기여자 분석
+    - Bug (417): 버그 수정 커밋
+    """
+    return [
+        cl.Starter(
+            label="저장소 인덱싱 시작",
+            message="현재 저장소의 커밋 히스토리를 인덱싱해주세요. 저장소 규모를 먼저 확인하고 적절한 개수를 제안해주세요.",
+            icon="https://img.icons8.com/?id=1476&format=png&size=64",
+        ),
+        cl.Starter(
+            label="최근 커밋 요약",
+            message="최근 10개의 커밋을 요약해주세요. 주요 변경사항과 패턴을 분석해주세요.",
+            icon="https://img.icons8.com/?id=33279&format=png&size=64",
+        ),
+        cl.Starter(
+            label="기여자 활동 분석",
+            message="저장소의 기여자별 활동을 분석해주세요. 누가 가장 많이 기여했는지, 주요 담당 영역은 무엇인지 알려주세요.",
+            icon="https://img.icons8.com/?id=102261&format=png&size=64",
+        ),
+        cl.Starter(
+            label="버그 수정 커밋 찾기",
+            message="버그 수정과 관련된 커밋들을 찾아서 분석해주세요. 어떤 버그들이 주로 수정되었는지 요약해주세요.",
+            icon="https://img.icons8.com/?id=417&format=png&size=64",
+        ),
+    ]
+
+
+@cl.on_chat_start
+async def on_chat_start():
+    """채팅 시작 시 초기화 - Chainlit chat life cycle의 on_chat_start 훅
+
+    Note: 환영 메시지는 chainlit.md에서 처리됨
+    이 함수는 세션 초기화만 수행하여 starters가 먼저 보이도록 함
+    """
+    try:
+        # 클라이언트 초기화
+        openai_client, search_client, index_client = initialize_clients()
+
+        # 세션 변수 설정
+        cl.user_session.set("openai_client", openai_client)
+        cl.user_session.set("search_client", search_client)
+        cl.user_session.set("index_client", index_client)
+        cl.user_session.set("conversation_history", [
+            {"role": "system", "content": get_system_prompt()}
+        ])
+        cl.user_session.set("is_processing", False)
+
+        logger.info("Chat session started - clients initialized")
+
+    except Exception as e:
+        logger.error(f"Failed to start chat: {e}")
+        # 초기화 실패 시에만 메시지 표시
+        await cl.Message(content=f"❌ 초기화 실패: {str(e)}\n\n페이지를 새로고침하거나 관리자에게 문의하세요.").send()
+
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    """메시지 처리 - Chainlit chat life cycle의 on_message 훅"""
+    try:
+        # 처리 중인 메시지가 있는지 확인
+        is_processing = cl.user_session.get("is_processing")
+        if is_processing:
+            await cl.Message(content="이전 요청을 처리 중입니다. 잠시 후 다시 시도해주세요.").send()
+            return
+
+        # 처리 시작 플래그 설정
+        cl.user_session.set("is_processing", True)
+
+        openai_client = cl.user_session.get("openai_client")
+        search_client = cl.user_session.get("search_client")
+        index_client = cl.user_session.get("index_client")
+        conversation_history = cl.user_session.get("conversation_history")
+
+        if not openai_client or not search_client or not index_client:
+            cl.user_session.set("is_processing", False)
+            await cl.Message(content="세션이 초기화되지 않았습니다. 페이지를 새로고침하세요.").send()
+            return
+
+        user_message = message.content
+        conversation_history.append({"role": "user", "content": user_message})
+
+        # 대화 기록 길이 제한 (시스템 프롬프트 + 최근 N개 메시지)
+        max_history_length = MAX_CONVERSATION_MESSAGES + 1  # +1 for system prompt
+        if len(conversation_history) > max_history_length:
+            system_msg = conversation_history[0]
+            recent_messages = conversation_history[-(MAX_CONVERSATION_MESSAGES):]
+            conversation_history = [system_msg] + recent_messages
+            logger.info(f"Conversation history trimmed to {len(conversation_history)} messages")
+
+        msg = cl.Message(content="")
+        await msg.send()
+
+        max_iterations = 10
+        iteration = 0
+        has_tool_result = False  # 도구 실행 후 최종 응답 보장용 플래그
+
+        while iteration < max_iterations:
+            iteration += 1
+
+            async with cl.Step(name=f"💭 분석 중... (단계 {iteration})", type="llm", show_input=False) as step:
+                try:
+                    response = openai_client.chat.completions.create(
+                        model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
+                        messages=conversation_history,
+                        tools=AVAILABLE_TOOLS,
+                        tool_choice="auto",
+                        temperature=0.7,
+                        max_tokens=1000
+                    )
+
+                    assistant_message = response.choices[0].message
+
+                    # LLM의 생각 표시 (간결하게)
+                    if assistant_message.tool_calls:
+                        tool_names = [tc.function.name for tc in assistant_message.tool_calls]
+                        step.output = f"🔧 도구 실행: {', '.join(tool_names)}"
+                    elif assistant_message.content:
+                        step.output = "✅ 응답 생성 완료"
+
+                    # 도구 호출 없이 최종 응답만 있는 경우
+                    if not assistant_message.tool_calls:
+                        conversation_history.append({
+                            "role": "assistant",
+                            "content": assistant_message.content
+                        })
+                        # 메인 메시지에 최종 응답 표시
+                        msg.content = assistant_message.content or "응답이 생성되었습니다."
+                        await msg.update()
+                        break
+
+                    conversation_history.append({
+                        "role": "assistant",
+                        "content": assistant_message.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            }
+                            for tc in assistant_message.tool_calls
+                        ]
+                    })
+
+                    for tool_call in assistant_message.tool_calls:
+                        tool_name = tool_call.function.name
+                        tool_args = json.loads(tool_call.function.arguments)
+
+                        # Step 밖에서 도구 실행 (AskActionMessage가 숨지 않도록)
+                        tool_result = await execute_tool(
+                            tool_name=tool_name,
+                            arguments=tool_args,
+                            openai_client=openai_client,
+                            search_client=search_client,
+                            index_client=index_client
+                        )
+
+                        # 도구 실행 완료 플래그 설정
+                        has_tool_result = True
+
+                        # 결과를 Step으로 표시 (간결하게)
+                        async with cl.Step(name=f"✅ {tool_name} 완료", parent_id=step.id, type="tool", show_input=False) as tool_step:
+                            # 결과 크기 제한 (SocketIO 페이로드 제한 회피)
+                            display_result = tool_result[:MAX_TOOL_RESULT_DISPLAY] if len(tool_result) > MAX_TOOL_RESULT_DISPLAY else tool_result
+
+                            # Step 출력은 간결하게
+                            if len(tool_result) > MAX_TOOL_RESULT_DISPLAY:
+                                tool_step.output = f"✅ 완료 (결과 {len(tool_result):,}자, 일부 생략)"
+                            else:
+                                tool_step.output = f"✅ 완료"
+
+                            # LLM에게 전달할 결과는 더 길게 허용하되 제한
+                            truncated_result = tool_result[:MAX_TOOL_RESULT_TO_LLM]
+                            if len(tool_result) > MAX_TOOL_RESULT_TO_LLM:
+                                truncated_result += f"\n\n...(총 {len(tool_result)}자 중 {MAX_TOOL_RESULT_TO_LLM}자 표시)"
+                                logger.warning(f"Tool result truncated: {len(tool_result)} -> {MAX_TOOL_RESULT_TO_LLM}")
+
+                            conversation_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": truncated_result
+                            })
+
+                except Exception as e:
+                    logger.error(f"Error in iteration {iteration}: {e}")
+                    step.output = f"❌ 오류 발생: {str(e)}"
+                    break
+
+        # 도구 실행 후 최종 응답이 없으면 강제로 응답 생성
+        if has_tool_result and iteration < max_iterations and not msg.content:
+            try:
+                logger.info("Forcing final response after tool execution")
+                async with cl.Step(name="💬 최종 응답 생성", type="llm", show_input=False) as final_step:
+                    final_response = openai_client.chat.completions.create(
+                        model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
+                        messages=conversation_history,
+                        temperature=0.7,
+                        max_tokens=1000
+                    )
+                    final_content = final_response.choices[0].message.content
+                    conversation_history.append({
+                        "role": "assistant",
+                        "content": final_content
+                    })
+                    msg.content = final_content or "작업이 완료되었습니다."
+                    await msg.update()
+                    final_step.output = "✅ 응답 완료"
+            except Exception as e:
+                logger.error(f"Error generating final response: {e}")
+                msg.content = "작업이 완료되었습니다."
+                await msg.update()
+
+        if iteration >= max_iterations and not msg.content:
+            msg.content = "⚠️ 최대 반복 횟수에 도달했습니다. 요청을 다시 시도해주세요."
+            await msg.update()
+
+        cl.user_session.set("conversation_history", conversation_history)
+
+    except Exception as e:
+        logger.error(f"Message handling error: {e}")
+        await cl.Message(content=f"오류가 발생했습니다: {str(e)}").send()
+    finally:
+        # 처리 완료 플래그 해제
+        cl.user_session.set("is_processing", False)
+
+
+@cl.on_stop
+async def on_stop():
+    """사용자가 중지 버튼을 클릭했을 때 - Chainlit chat life cycle의 on_stop 훅"""
+    logger.info("User requested to stop the task")
+    cl.user_session.set("is_processing", False)
+    await cl.Message(content="⏸️ 작업이 중지되었습니다.").send()
+
+
+@cl.on_chat_end
+async def on_chat_end():
+    """채팅 세션 종료 시 - Chainlit chat life cycle의 on_chat_end 훅"""
+    logger.info("Chat session ended")
+    # 세션 정리 (필요시)
+    cl.user_session.set("is_processing", False)
+    cl.user_session.set("conversation_history", None)
+    cl.user_session.set("openai_client", None)
+    cl.user_session.set("search_client", None)
+    cl.user_session.set("index_client", None)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
