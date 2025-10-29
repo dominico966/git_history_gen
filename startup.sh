@@ -20,8 +20,8 @@ export CHAINLIT_PORT=8080
 #fi
 
 # Install git if not installed
-sudo apt-get update
-sudo apt-get install git -y
+apt-get update
+apt-get install git -y
 
 # Run Chainlit app
 python -m chainlit run src/chat_app.py
