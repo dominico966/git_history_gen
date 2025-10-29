@@ -535,7 +535,6 @@ python-socketio==5.14.2
     # via chainlit
 pytz==2025.2
     # via pandas
-pywin32==311
     # via mcp
 pyyaml==6.0.3
     # via huggingface-hub
