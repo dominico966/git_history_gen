@@ -164,6 +164,7 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 - [🗂️ 발표 체크리스트](docs/PRESENTATION_CHECKLIST.md)
 - [🎬 데모 스크립트](docs/DEMO_SCRIPT.md)
 - [❓ Q&A 예상 질문](docs/QNA.md)
+- [🏁 평가 대응 브리프](docs/EVALUATION_BRIEF.md)
 
 ### 기술 문서
 - [🔧 온라인 읽기 도구](docs/ONLINE_READER_TOOLS.md)
@@ -267,29 +268,42 @@ ChatGPT처럼 실시간으로 답변 생성
 - **메시지 히스토리**: 최근 8개만 유지
 - **증분 인덱싱**: 새 커밋만 추가
 
-## 🤝 기여
+[//]: # (## 🤝 기여)
 
-이슈와 PR을 환영합니다!
+[//]: # ()
+[//]: # (이슈와 PR을 환영합니다!)
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+[//]: # ()
+[//]: # (1. Fork the Project)
+
+[//]: # (2. Create your Feature Branch &#40;`git checkout -b feature/AmazingFeature`&#41;)
+
+[//]: # (3. Commit your Changes &#40;`git commit -m 'Add some AmazingFeature'`&#41;)
+
+[//]: # (4. Push to the Branch &#40;`git push origin feature/AmazingFeature`&#41;)
+
+[//]: # (5. Open a Pull Request)
 
 [//]: # (## 📄 라이선스)
 
 [//]: # (라이선스 문서를 추가하면 여기 링크를 활성화하세요)
 
-## 🧩 운영(프로덕션) 참고: "읽어보기" 버튼만 보일 때
-- 대부분 WebSocket 미업그레이드(프록시 설정 누락) or 환경변수 미설정으로 on_chat_start 초기화 실패일 때 발생합니다.
-- 체크리스트
-  - 프록시에서 WebSocket 업그레이드 허용(Upgrade/Connection 헤더, 타임아웃/버퍼 크기)
-  - 체인릿 루트 경로 사용 시 서버 루트 경로 설정(root_path) 일치 여부
-  - AZURE_OPENAI/SEARCH 관련 환경변수 값 유효성 확인(엔드포인트/키/인덱스명)
-  - 브라우저 콘솔/네트워크 탭에서 /ws 연결 상태, 401/403/404 에러 존재 여부
+[//]: # (## 🧩 운영&#40;프로덕션&#41; 참고: "읽어보기" 버튼만 보일 때)
 
----
+[//]: # (- 대부분 WebSocket 미업그레이드&#40;프록시 설정 누락&#41; or 환경변수 미설정으로 on_chat_start 초기화 실패일 때 발생합니다.)
+
+[//]: # (- 체크리스트)
+
+[//]: # (  - 프록시에서 WebSocket 업그레이드 허용&#40;Upgrade/Connection 헤더, 타임아웃/버퍼 크기&#41;)
+
+[//]: # (  - 체인릿 루트 경로 사용 시 서버 루트 경로 설정&#40;root_path&#41; 일치 여부)
+
+[//]: # (  - AZURE_OPENAI/SEARCH 관련 환경변수 값 유효성 확인&#40;엔드포인트/키/인덱스명&#41;)
+
+[//]: # (  - 브라우저 콘솔/네트워크 탭에서 /ws 연결 상태, 401/403/404 에러 존재 여부)
+
+[//]: # ()
+[//]: # (---)
 
 **제작**: AI Agent with GitHub Copilot  
 **최종 업데이트**: 2025-10-30  
