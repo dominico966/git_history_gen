@@ -125,19 +125,22 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 ## 🛠️ 사용 가능한 도구 (18개)
 
 ### 저장소/검색/설정
+
 1. set_current_repository — 현재 저장소 설정
 2. get_commit_count — 저장소 커밋 개수(기간 필터 지원)
 3. search_github_repo — GitHub 저장소 검색
 
 ### 커밋 분석/검색
-4. index_repository — 커밋 인덱싱 (Azure AI Search)
-5. get_commit_summary — LLM 기반 요약
-6. search_commits — 하이브리드 검색 (텍스트 + 벡터)
-7. analyze_contributors — 기여자 분석
-8. find_bug_commits — 버그 커밋 탐지
-9. search_commits_by_date — 날짜 범위 커밋 검색
+
+4. get_commit_summary — LLM 기반 요약
+5. search_commits — 하이브리드 검색 (텍스트 + 벡터)
+6. analyze_contributors — 기여자 분석
+7. find_bug_commits — 버그 커밋 탐지
+8. search_commits_by_date — 날짜 범위 커밋 검색
 
 ### 인덱스 관리
+
+9. index_repository — 커밋 인덱싱 (Azure AI Search)
 10. get_index_statistics — 인덱스 통계 정보
 11. list_indexed_repositories — 인덱싱된 저장소 목록
 12. get_repository_info — 특정 저장소 상세 정보
@@ -145,18 +148,19 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 14. check_index_health — 인덱스 상태 확인
 
 ### 온라인 읽기
+
 15. get_readme — README 읽기
 16. read_file_from_commit — 특정 커밋 파일 읽기
 17. get_file_context — 파일 diff 및 컨텍스트
 18. get_commit_diff — 커밋 전체 diff
 
-(참고: 기존 문서의 get_current_repository, read_github_file, search_github_repository 표기는 실제 구현 명칭과 달라 위와 같이 교정되었습니다.)
+*참고: 실제 구현된 도구명은 `find_frequent_bug_commits`이며, 카테고리별로 기능적 그룹화하여 정리했습니다.*
 
 ## 📚 문서
 
 ### 시작하기
 - [⚡ 빠른 실행 가이드](CHAINLIT_QUICKSTART.md)
-- [🗄️ Azure AI Search Index 활용 가이드](docs/AZURE_SEARCH_INDEX_GUIDE.md) 🆕
+- [🗄️ Azure AI Search Index 활용 가이드](docs/AZURE_SEARCH_INDEX_GUIDE.md)
 
 ### 프로젝트 정보
 - [🗂️ 발표 체크리스트](docs/PRESENTATION_CHECKLIST.md)
@@ -204,7 +208,8 @@ LLM이 자동으로 적절한 도구를 선택하고 실행합니다.
 # → 관련도 높은 커밋 반환
 ```
 
-### 3. 인덱스 관리 (NEW! 🆕)
+### 3. 인덱스 관리
+
 Azure AI Search를 활용한 커밋 데이터 관리
 
 ```python
@@ -230,19 +235,21 @@ Azure AI Search를 활용한 커밋 데이터 관리
 ```
 
 **예제 스크립트 실행**:
+
 ```bash
 python examples/index_usage_examples.py
 ```
 
 9가지 실용 예제 포함:
+
 - 기본 인덱싱
 - 인덱스 통계 확인
 - 다중 저장소 관리
 - 증분 인덱싱
 - 날짜 범위 인덱싱
-```
 
 ### 3. 스트리밍 응답
+
 ChatGPT처럼 실시간으로 답변 생성
 
 ```python
@@ -251,6 +258,7 @@ ChatGPT처럼 실시간으로 답변 생성
 ```
 
 ### 4. 저장소 캐시
+
 원격 저장소를 한 번만 복제하여 속도 개선
 
 ```python
@@ -301,6 +309,7 @@ ChatGPT처럼 실시간으로 답변 생성
 [//]: # (  - 브라우저 콘솔/네트워크 탭에서 /ws 연결 상태, 401/403/404 에러 존재 여부)
 
 [//]: # ()
+
 [//]: # (---)
 
 **제작**: AI Agent with GitHub Copilot  
