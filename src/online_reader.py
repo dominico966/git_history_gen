@@ -210,7 +210,7 @@ def read_file_from_commit(repo_path: str, commit_sha: str, file_path: str) -> Op
 
     Args:
         repo_path: 저장소 경로
-        commit_sha: 커밋 해시
+        commit_sha: 커밋 해시 또는 짧은 SHA
         file_path: 파일 경로
 
     Returns:
@@ -222,10 +222,43 @@ def read_file_from_commit(repo_path: str, commit_sha: str, file_path: str) -> Op
         # 원격 저장소면 캐시에서 가져오기
         if repo_path.startswith(('http://', 'https://', 'git@')):
             cache = RepoCloneCache()
+            # 특정 커밋 필요 - 없으면 fetch
             cached_path = cache.get_or_clone(repo_path)
             repo = git.Repo(cached_path)
         else:
             repo = git.Repo(repo_path)
+
+        # 커밋 해석
+        commit = None
+        try:
+            commit = repo.commit(commit_sha)
+        except:
+            # 짧은 SHA 시도
+            if len(commit_sha) >= 4 and not commit_sha.isdigit():
+                try:
+                    full_sha = repo.git.rev_parse(commit_sha)
+                    commit = repo.commit(full_sha)
+                except:
+                    # rev-list로 검색
+                    try:
+                        all_commits = repo.git.rev_list('--all', '--abbrev-commit', f'--abbrev={len(commit_sha)}').split('\n')
+                        for sha in all_commits:
+                            if sha.startswith(commit_sha):
+                                full_sha = repo.git.rev_parse(sha)
+                                commit = repo.commit(full_sha)
+                                break
+                    except:
+                        pass
+            # 숫자면 HEAD~N
+            elif commit_sha.isdigit():
+                try:
+                    commit = repo.commit(f'HEAD~{int(commit_sha)}')
+                except:
+                    pass
+
+        if not commit:
+            logger.error(f"Cannot resolve commit: {commit_sha}")
+            return None
 
         # 커밋 객체 가져오기
         commit = repo.commit(commit_sha)
@@ -251,7 +284,7 @@ def get_file_context(repo_path: str, commit_sha: str, file_path: str, lines_arou
 
     Args:
         repo_path: 저장소 경로
-        commit_sha: 커밋 해시
+        commit_sha: 커밋 해시 또는 짧은 SHA
         file_path: 파일 경로
         lines_around: 변경 부분 주변 라인 수
 
@@ -269,7 +302,37 @@ def get_file_context(repo_path: str, commit_sha: str, file_path: str, lines_arou
         else:
             repo = git.Repo(repo_path)
 
-        commit = repo.commit(commit_sha)
+        # 커밋 해석
+        commit = None
+        try:
+            commit = repo.commit(commit_sha)
+        except:
+            # 짧은 SHA 시도
+            if len(commit_sha) >= 4 and not commit_sha.isdigit():
+                try:
+                    full_sha = repo.git.rev_parse(commit_sha)
+                    commit = repo.commit(full_sha)
+                except:
+                    # rev-list로 검색
+                    try:
+                        all_commits = repo.git.rev_list('--all', '--abbrev-commit', f'--abbrev={len(commit_sha)}').split('\n')
+                        for sha in all_commits:
+                            if sha.startswith(commit_sha):
+                                full_sha = repo.git.rev_parse(sha)
+                                commit = repo.commit(full_sha)
+                                break
+                    except:
+                        pass
+            # 숫자면 HEAD~N
+            elif commit_sha.isdigit():
+                try:
+                    commit = repo.commit(f'HEAD~{int(commit_sha)}')
+                except:
+                    pass
+
+        if not commit:
+            logger.error(f"Cannot resolve commit: {commit_sha}")
+            return None
 
         # 파일 전체 내용
         try:
@@ -314,7 +377,7 @@ def get_commit_diff(repo_path: str, commit_sha: str, max_files: int = 10) -> Opt
 
     Args:
         repo_path: 저장소 경로 또는 URL
-        commit_sha: 커밋 해시
+        commit_sha: 커밋 해시 또는 짧은 SHA (최소 4자)
         max_files: 표시할 최대 파일 수
 
     Returns:
@@ -328,10 +391,90 @@ def get_commit_diff(repo_path: str, commit_sha: str, max_files: int = 10) -> Opt
             cache = RepoCloneCache()
             cached_path = cache.get_or_clone(repo_path)
             repo = git.Repo(cached_path)
+            is_remote = True
         else:
             repo = git.Repo(repo_path)
+            cached_path = repo_path
+            is_remote = False
 
-        commit = repo.commit(commit_sha)
+        # 커밋 SHA 해석 시도
+        commit = None
+
+        # 1. 직접 해석 시도
+        try:
+            commit = repo.commit(commit_sha)
+            logger.debug(f"Resolved commit directly: {commit_sha}")
+        except (git.exc.BadName, ValueError):
+            pass
+
+        # 2. 짧은 SHA로 검색 시도 (rev-parse)
+        if not commit and len(commit_sha) >= 4 and not commit_sha.isdigit():
+            try:
+                full_sha = repo.git.rev_parse(commit_sha)
+                commit = repo.commit(full_sha)
+                logger.info(f"Resolved short SHA '{commit_sha}' to {full_sha[:8]}")
+            except Exception as e:
+                logger.debug(f"rev-parse failed: {e}")
+
+        # 3. rev-list로 검색 시도 (shallow clone에서 더 잘 작동)
+        if not commit and len(commit_sha) >= 4 and not commit_sha.isdigit():
+            try:
+                # rev-list --all로 모든 커밋에서 검색
+                all_commits = repo.git.rev_list('--all', '--abbrev-commit', f'--abbrev={len(commit_sha)}').split('\n')
+                for sha in all_commits:
+                    if sha.startswith(commit_sha):
+                        full_sha = repo.git.rev_parse(sha)
+                        commit = repo.commit(full_sha)
+                        logger.info(f"Found commit via rev-list: {commit_sha} → {full_sha[:8]}")
+                        break
+            except Exception as e:
+                logger.debug(f"rev-list search failed: {e}")
+
+        # 4. 여전히 없으면 더 깊게 fetch 시도 (원격 저장소만)
+        if not commit and is_remote and len(commit_sha) >= 4 and not commit_sha.isdigit():
+            try:
+                logger.info(f"Commit not found in shallow clone, fetching deeper...")
+                cache.get_or_clone(repo_path, depth=1000)
+                repo = git.Repo(cached_path)
+
+                # 다시 시도
+                try:
+                    full_sha = repo.git.rev_parse(commit_sha)
+                    commit = repo.commit(full_sha)
+                    logger.info(f"Found commit after deep fetch: {commit_sha} → {full_sha[:8]}")
+                except:
+                    pass
+            except Exception as e:
+                logger.debug(f"Deep fetch failed: {e}")
+
+        # 5. HEAD~N 형태로 시도 (숫자만 있는 경우)
+        if not commit and commit_sha.isdigit():
+            try:
+                offset = int(commit_sha)
+                commit = repo.commit(f'HEAD~{offset}')
+                logger.info(f"Resolved commit #{commit_sha} as HEAD~{offset}")
+            except Exception as e:
+                logger.debug(f"HEAD~N failed: {e}")
+
+        if not commit:
+            error_msg = f"커밋을 찾을 수 없습니다: {commit_sha}\n\n"
+            error_msg += "가능한 원인:\n"
+            error_msg += "1. 짧은 SHA가 최근 커밋에 없음 (shallow clone은 최근 1000개만 포함)\n"
+            error_msg += "2. 다른 브랜치의 커밋\n"
+            error_msg += "3. SHA가 잘못됨\n\n"
+            error_msg += "해결 방법:\n"
+            error_msg += "- 전체 40자 SHA 사용\n"
+            error_msg += "- 최근 커밋 중에서 검색\n"
+            error_msg += f"- 저장소에서 직접 확인: {repo_path}"
+            logger.error(f"Cannot resolve commit: {commit_sha} (tried direct, rev-parse, rev-list, deep fetch)")
+
+            # 에러 메시지를 반환 (None 대신)
+            return {
+                "error": True,
+                "message": error_msg,
+                "commit_sha": commit_sha,
+                "repo_path": repo_path
+            }
 
         result = {
             "commit_sha": commit.hexsha,

@@ -154,6 +154,59 @@ class RepoCloneCache:
         except Exception as e:
             logger.debug(f"Failed to add safe.directory (non-critical): {e}")
 
+    def _ensure_commit_exists(self, repo_path: str, repo_url: str, commit_sha: str) -> bool:
+        """
+        특정 커밋이 로컬 저장소에 존재하는지 확인하고, 없으면 fetch
+
+        Args:
+            repo_path: 로컬 저장소 경로
+            repo_url: 원격 저장소 URL
+            commit_sha: 확인할 커밋 SHA
+
+        Returns:
+            bool: 커밋이 존재하면 True
+        """
+        try:
+            repo = git.Repo(repo_path)
+
+            # 커밋이 존재하는지 확인
+            try:
+                repo.commit(commit_sha)
+                logger.debug(f"Commit {commit_sha[:8]} exists locally")
+                return True
+            except (git.exc.BadName, ValueError):
+                # 커밋이 없으면 fetch 시도
+                logger.info(f"Commit {commit_sha[:8]} not found, fetching...")
+
+                origin = repo.remotes.origin
+
+                # 특정 커밋을 포함하도록 더 깊게 fetch
+                try:
+                    # 먼저 depth를 늘려서 fetch
+                    origin.fetch(depth=1000)
+
+                    # 다시 확인
+                    try:
+                        repo.commit(commit_sha)
+                        logger.info(f"✓ Fetched commit {commit_sha[:8]}")
+                        return True
+                    except:
+                        # 여전히 없으면 전체 히스토리 fetch
+                        logger.info(f"Fetching full history for commit {commit_sha[:8]}...")
+                        origin.fetch(unshallow=True)
+
+                        repo.commit(commit_sha)
+                        logger.info(f"✓ Fetched commit {commit_sha[:8]} (full history)")
+                        return True
+
+                except Exception as e:
+                    logger.warning(f"Failed to fetch commit {commit_sha[:8]}: {e}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error checking commit existence: {e}")
+            return False
+
     def _load_cache_metadata(self):
         """캐시 메타데이터를 JSON 파일에서 로드"""
         if os.path.exists(self._cache_file):
@@ -504,13 +557,14 @@ class RepoCloneCache:
         logger.error(f"⚠️ Manual cleanup required!")
         raise Exception(f"Cannot remove directory: {path}")
 
-    def get_or_clone(self, repo_url: str, depth: Optional[int] = None) -> str:
+    def get_or_clone(self, repo_url: str, depth: Optional[int] = None, ensure_commit: Optional[str] = None) -> str:
         """
         캐시된 클론을 반환하거나 새로 클론합니다.
 
         Args:
             repo_url: 원격 저장소 URL
-            depth: clone depth (None이면 전체 히스토리, 기본값: None)
+            depth: clone depth (None=shallow clone with depth=50, 0=full history)
+            ensure_commit: 특정 커밋이 필요한 경우 (없으면 fetch)
 
         Returns:
             str: 로컬 저장소 경로
@@ -532,6 +586,26 @@ class RepoCloneCache:
                 # 캐시된 경로가 유효한지 확인
                 if os.path.exists(cached_path):
                     try:
+                        # depth 요청이 있고 기존보다 깊게 필요한 경우
+                        if depth and depth > 50:  # 기본 shallow depth보다 크면
+                            logger.info(f"Fetching more commits (depth={depth})...")
+                            self._add_safe_directory(cached_path)
+                            repo = git.Repo(cached_path)
+                            origin = repo.remotes.origin
+                            # deepen fetch
+                            origin.fetch(depth=depth)
+                            repo.close()
+                            logger.info(f"✓ Fetched more commits: {cached_path}")
+
+                        # 특정 커밋이 필요한 경우 확인
+                        if ensure_commit:
+                            if self._ensure_commit_exists(cached_path, repo_url, ensure_commit):
+                                logger.info(f"✓ Cache hit with commit {ensure_commit[:8]}: {cached_path}")
+                                return cached_path
+                            else:
+                                # 커밋 fetch 시도
+                                logger.warning(f"Commit {ensure_commit[:8]} not found, will fetch")
+
                         # 이 저장소만 검증 및 업데이트
                         if self._validate_single_repo(cache_key):
                             logger.info(f"✓ Cache hit and updated: {cached_path}")
@@ -620,6 +694,7 @@ class RepoCloneCache:
 
             # 새로 클론
             logger.info(f"Cloning fresh repository (full history)...")
+            logger.warning(f"⚠️ Large repository detected. This may take several minutes...")
 
             # Windows에서 긴 경로 지원 설정
             try:
@@ -631,16 +706,180 @@ class RepoCloneCache:
             except Exception as e:
                 logger.debug(f"Could not set git longpaths: {e}")
 
-            # depth 파라미터 없이 전체 clone
+            # 진행 상황 콜백
+            class CloneProgress(git.RemoteProgress):
+                def __init__(self):
+                    super().__init__()
+                    self.last_log_time = time.time()
+                    self.message_obj = None
+                    self.current_stage = None
+                    self.stage_start_time = time.time()
+
+                    # Chainlit 사용 가능한지 확인
+                    try:
+                        import chainlit as cl
+                        self.cl = cl
+                        # 현재 Chainlit 컨텍스트가 있는지 확인
+                        if hasattr(cl.context, 'session') and cl.context.session:
+                            self.use_chainlit = True
+                        else:
+                            self.use_chainlit = False
+                    except:
+                        self.cl = None
+                        self.use_chainlit = False
+
+                def _get_stage_name(self, op_code):
+                    """작업 코드에서 단계 이름 추출"""
+                    if op_code & self.COUNTING:
+                        return "Counting objects"
+                    elif op_code & self.COMPRESSING:
+                        return "Compressing objects"
+                    elif op_code & self.RECEIVING:
+                        return "Receiving objects"
+                    elif op_code & self.RESOLVING:
+                        return "Resolving deltas"
+                    elif op_code & self.FINDING_SOURCES:
+                        return "Finding sources"
+                    elif op_code & self.CHECKING_OUT:
+                        return "Checking out files"
+                    else:
+                        return "Processing"
+
+                def update(self, op_code, cur_count, max_count=None, message=''):
+                    # 현재 단계 확인
+                    stage = self._get_stage_name(op_code)
+
+                    # 단계가 변경되면 로그
+                    if stage != self.current_stage:
+                        if self.current_stage:
+                            elapsed = time.time() - self.stage_start_time
+                            logger.info(f"✓ {self.current_stage} completed in {elapsed:.1f}s")
+                        self.current_stage = stage
+                        self.stage_start_time = time.time()
+                        logger.info(f"▶ {stage}...")
+
+                    # 5초마다 진행 상황 로그
+                    now = time.time()
+                    if now - self.last_log_time >= 5:
+                        if max_count and max_count > 0:
+                            percentage = (cur_count / max_count * 100)
+                            msg = f"  🔄 {stage}: {percentage:.1f}% ({cur_count:,}/{max_count:,})"
+                        else:
+                            msg = f"  🔄 {stage}: {cur_count:,} items"
+
+                        logger.info(msg)
+
+                        # Chainlit UI에도 표시
+                        if self.use_chainlit and self.cl:
+                            try:
+                                import asyncio
+
+                                async def send_or_update():
+                                    if self.message_obj is None:
+                                        # 첫 메시지 생성
+                                        self.message_obj = await self.cl.Message(
+                                            content=msg,
+                                            author="System"
+                                        ).send()
+                                    else:
+                                        # 기존 메시지 업데이트
+                                        self.message_obj.content = msg
+                                        await self.message_obj.update()
+
+                                # 이벤트 루프에서 실행
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        # 이미 실행 중인 루프에서는 task 생성
+                                        asyncio.create_task(send_or_update())
+                                    else:
+                                        # 새 루프 실행
+                                        asyncio.run(send_or_update())
+                                except:
+                                    # 동기 방식으로 시도
+                                    pass
+                            except Exception as e:
+                                logger.debug(f"Failed to send Chainlit message: {e}")
+
+                        self.last_log_time = now
+
+            # depth 설정 (기본값: shallow clone)
+            if depth is None:
+                # 기본: shallow clone (depth=50)
+                clone_depth = 50
+                logger.info(f"Using shallow clone (depth={clone_depth})")
+            elif depth == 0:
+                # 전체 히스토리
+                clone_depth = None
+                logger.info("Using full history clone")
+            else:
+                clone_depth = depth
+                logger.info(f"Using custom depth: {clone_depth}")
+
             clone_kwargs = {
-                'single_branch': True
+                'single_branch': True,
+                'progress': CloneProgress()  # 진행 상황 추가
             }
+
+            if clone_depth:
+                clone_kwargs['depth'] = clone_depth
+
+            logger.info(f"Starting clone of {repo_url}...")
+
+            # Chainlit UI에 시작 메시지 전송
+            try:
+                import chainlit as cl
+                if hasattr(cl.context, 'session') and cl.context.session:
+                    import asyncio
+                    async def send_start_msg():
+                        await cl.Message(
+                            content=f"🔄 저장소 클론 시작: {repo_url}\n⚠️ 큰 저장소는 수 분이 소요될 수 있습니다.",
+                            author="System"
+                        ).send()
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(send_start_msg())
+                        else:
+                            asyncio.run(send_start_msg())
+                    except:
+                        pass
+            except:
+                pass
+
+            start_time = time.time()
 
             repo = git.Repo.clone_from(
                 repo_url,
                 local_path,
                 **clone_kwargs
             )
+
+            elapsed = time.time() - start_time
+            logger.info(f"✓ Clone completed in {elapsed:.1f} seconds")
+
+            # Chainlit UI에 완료 메시지 전송
+            try:
+                import chainlit as cl
+                if hasattr(cl.context, 'session') and cl.context.session:
+                    import asyncio
+                    async def send_complete_msg():
+                        await cl.Message(
+                            content=f"✅ 저장소 클론 완료! ({elapsed:.1f}초)",
+                            author="System"
+                        ).send()
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(send_complete_msg())
+                        else:
+                            asyncio.run(send_complete_msg())
+                    except:
+                        pass
+            except:
+                pass
 
             # Azure 환경에서 safe.directory 설정 (클론 직후)
             self._add_safe_directory(local_path)

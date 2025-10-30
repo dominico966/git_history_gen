@@ -163,7 +163,8 @@ class CommitIndexer:
         since: Optional[str] = None,
         until: Optional[str] = None,
         skip_existing: bool = True,
-        skip_offset: int = 0
+        skip_offset: int = 0,
+        progress_callback: Optional[callable] = None
     ) -> int:
         """
         Git 저장소의 커밋 데이터를 인덱싱합니다.
@@ -175,6 +176,7 @@ class CommitIndexer:
             until: 종료 날짜 (ISO 8601 형식, 예: '2024-12-31')
             skip_existing: 이미 인덱싱된 커밋 건너뛰기 (증분 인덱싱, 기본값: True)
             skip_offset: HEAD부터 건너뛸 커밋 수 (과거 커밋 추가 시 사용, 기본값: 0)
+            progress_callback: 진행 상황 콜백 함수 (current, total, message)
 
         Returns:
             int: 인덱싱된 문서 수
@@ -201,6 +203,15 @@ class CommitIndexer:
                 except Exception as e:
                     logger.warning(f"Failed to get existing commits: {e}")
 
+            # skip_offset이 크면 미리 충분한 depth로 fetch (원격 저장소만)
+            if skip_offset > 0 and repo_path.startswith(('http://', 'https://', 'git@', 'ssh://')):
+                required_depth = skip_offset + (limit if limit else 100)
+                logger.info(f"Skip offset {skip_offset} detected, pre-fetching with depth={required_depth}")
+
+                from src.repo_cache import RepoCloneCache
+                cache = RepoCloneCache()
+                cache.get_or_clone(repo_path, depth=required_depth)
+
             # 커밋 데이터 추출
             generator = DocumentGenerator(repo_path)
             try:
@@ -209,7 +220,11 @@ class CommitIndexer:
                 generator.close()  # 파일 핸들 해제
 
             if not commits:
-                logger.warning("No commits found")
+                if skip_offset > 0:
+                    logger.warning(f"No commits found with skip_offset={skip_offset}. Shallow clone may not have enough commits.")
+                    logger.warning(f"Try with smaller skip_offset or ensure repository is fully fetched.")
+                else:
+                    logger.warning("No commits found")
                 return 0
 
             # 이미 인덱싱된 커밋 필터링
@@ -230,7 +245,17 @@ class CommitIndexer:
             documents = []
             texts_to_embed = []
 
-            for commit in commits:
+            total_commits = len(commits)
+
+            for idx, commit in enumerate(commits):
+                # 진행 상황 콜백
+                if progress_callback:
+                    try:
+                        progress_callback(idx, total_commits, "문서 준비 중")
+                    except:
+                        pass
+
+                # ...existing code...
                 # 임베딩할 텍스트 생성 (향상된 문맥 포함)
                 files_info = [f"{f['file']} ({f['change_type']})" for f in commit['files']]
 
@@ -303,6 +328,12 @@ Functions: {'; '.join(func_changes) if func_changes else 'No function changes'}"
                 documents.append(doc)
 
             # 임베딩 생성
+            if progress_callback:
+                try:
+                    progress_callback(total_commits, total_commits, "임베딩 생성 중")
+                except:
+                    pass
+
             logger.info("Generating embeddings...")
             embeddings = embed_texts(texts_to_embed, self.openai_client)
 
@@ -311,6 +342,12 @@ Functions: {'; '.join(func_changes) if func_changes else 'No function changes'}"
                 doc["content_vector"] = embedding
 
             # 업로드
+            if progress_callback:
+                try:
+                    progress_callback(total_commits, total_commits, "업로드 중")
+                except:
+                    pass
+
             logger.info(f"Uploading {len(documents)} documents to Azure AI Search...")
             result = self.search_client.upload_documents(documents=documents)
 

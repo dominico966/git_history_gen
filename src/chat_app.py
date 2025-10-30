@@ -43,65 +43,44 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 안전 장치: 최대값 제한 (토큰/비용 폭탄 방지)
-MAX_COMMIT_LIMIT = int(os.getenv("MAX_COMMIT_LIMIT", "200"))
-MAX_SEARCH_TOP = int(os.getenv("MAX_SEARCH_TOP", "20"))
-MAX_CONTRIBUTOR_LIMIT = int(os.getenv("MAX_CONTRIBUTOR_LIMIT", "500"))
-DEFAULT_INDEX_LIMIT = int(os.getenv("DEFAULT_INDEX_LIMIT", "100"))
+MAX_COMMIT_LIMIT = int(os.getenv("MAX_COMMIT_LIMIT", "1000"))
+MAX_SEARCH_TOP = int(os.getenv("MAX_SEARCH_TOP", "50"))
+MAX_CONTRIBUTOR_LIMIT = int(os.getenv("MAX_CONTRIBUTOR_LIMIT", "1000"))
+DEFAULT_INDEX_LIMIT = int(os.getenv("DEFAULT_INDEX_LIMIT", "500"))
 
 # SocketIO 페이로드 제한
-MAX_TOOL_RESULT_DISPLAY = 300  # Step에 표시할 최대 문자 수
-MAX_TOOL_RESULT_TO_LLM = 2000  # LLM에 전달할 최대 문자 수
-MAX_CONVERSATION_MESSAGES = 8  # 시스템 프롬프트 + 최근 N개 메시지
+MAX_TOOL_RESULT_DISPLAY = 500  # Step에 표시할 최대 문자 수
+MAX_TOOL_RESULT_TO_LLM = 10000  # LLM에 전달할 최대 문자 수
+MAX_CONVERSATION_MESSAGES = 20  # 시스템 프롬프트 + 최근 N개 메시지
 
 def get_system_prompt() -> str:
-    """현재 날짜를 포함한 시스템 프롬프트 생성"""
+    """압축된 시스템 프롬프트 - 핵심 규칙만 포함"""
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
-    default_limit = DEFAULT_INDEX_LIMIT
 
-    parts = [
-        "Git 저장소 커밋 히스토리 분석 전문가. 사용자 요청에 따라 적절한 도구를 선택하여 실행하고 결과를 분석한다.",
-        f"오늘 날짜: {today}",
-        "",
-        "# 기본 규칙",
-        "- 분석 결과는 한국어로 명확하고 구조화된 형태로 제공",
-        "- 저장소 경로: 로컬 경로, GitHub URL, 또는 짧은 이름 지원",
-        "- 사용자가 모호한 저장소 이름 제공 시 시스템이 자동으로 선택 UI 제공",
-        "- 검색은 영어만 가능. 다른 언어 요청 시 영어로 번역 후 검색",
-        "",
-        "# 사용자 확인 규칙 (중요)",
-        "- **절대로 텍스트로 사용자에게 예/아니오를 묻지 마라**",
-        "- 사용자 확인이 필요한 작업(인덱싱 등)은 도구를 바로 실행하라",
-        "- 시스템이 자동으로 UI 버튼(AskActionMessage)을 통해 사용자 확인을 받는다",
-        "- 너는 도구 결과를 받아서 분석만 하면 된다",
-        "",
-        "# 인덱싱 전략",
-        "1. 저장소 분석 요청 시: list_indexed_repositories로 인덱싱 여부 먼저 확인",
-        "2. 인덱싱 전: get_commit_count로 저장소 커밋 개수 확인 필수",
-        f"3. 자동 인덱싱 기본값: 최근 {default_limit}개 커밋",
-        "4. **증분 인덱싱**: 항상 HEAD(최신)부터 시작. skip_existing=true로 중복 방지",
-        "5. **과거 커밋 추가**: skip_offset 파라미터 사용",
-        "   - 예: 이미 100개 인덱싱 → skip_offset=100, limit=50으로 101~150번째 과거 커밋 추가",
-        "   - get_repository_info로 현재 인덱싱된 개수 확인 후 skip_offset 설정",
-        "6. 규모별 전략:",
-        "   - ~100 커밋: 기본값 이하로 적절히 제안",
-        "   - 100~500 커밋: 검색 결과 부족 시 skip_offset으로 과거 커밋 추가",
-        "   - 500+ 커밋: 날짜 범위(since/until) 활용 또는 사용자에게 범위 확인",
-        "",
-        "# 도구 사용 규칙",
-        "- search_commits: 미인덱싱 시 시스템이 자동으로 UI 버튼으로 사용자 확인",
-        "- index_repository: 시스템이 자동으로 UI 버튼으로 사용자 확인 (대용량 인덱싱 시)",
-        "- get_commit_summary: 로컬 분석. 인덱싱 없이 사용 가능",
-        "- 날짜 필터: ISO 8601 형식 (YYYY-MM-DD) 사용",
-        "",
-        "# 응답 스타일 (중요)",
-        "- **도구 실행 후 반드시 결과를 사용자에게 설명하라**",
-        "- 도구 결과를 받으면 즉시 분석하고 요약하여 답변",
-        "- 인덱싱, 검색 등 완료 후 결과를 명확하게 제시",
-        "- '~하시겠습니까?', '~할까요?' 등 확인 질문 금지",
-        "- 간결하고 구조화된 형태로 답변 (마크다운 활용)",
-    ]
-    return "\n".join(parts)
+    return f"""Git 히스토리 분석 전문가. 오늘: {today}
+
+# 핵심 규칙
+- 한국어 구조화된 답변. 확인 질문 금지
+- 도구 바로 실행 → 결과 분석 → 명확한 설명
+- 검색은 영어만. 다른 언어시 번역
+
+# 인덱싱 전략
+1. 분석 요청시: list_indexed_repositories → get_commit_count 확인
+2. 기본: 최근 {DEFAULT_INDEX_LIMIT}개, HEAD부터 시작, skip_existing=true
+3. 증분: skip_offset으로 과거 커밋 추가
+4. **중요**: 인덱싱수 < 전체수 → 추가 필요. '전부' 요청시 100% 완료까지
+5. 규모별: ~100(기본), 100~500(skip_offset), 500+(날짜범위)
+
+# 필수 판단 원칙
+- **추측 금지**: get_commit_count ↔ get_repository_info 비교 필수
+- 부분 인덱싱 → 추가 작업, 완전 인덱싱 → "이미 있음" 가능
+- 날짜범위 후 실제 결과 검증
+
+# 도구
+- search_commits: 자동 UI 확인
+- index_repository: 대용량시 자동 UI 확인  
+- 날짜: YYYY-MM-DD 형식"""
 
 AVAILABLE_TOOLS = [
     {
@@ -360,7 +339,7 @@ AVAILABLE_TOOLS = [
         "type": "function",
         "function": {
             "name": "index_repository",
-            "description": "Git 저장소를 Azure AI Search에 인덱싱합니다. skip_offset을 사용하면 이미 인덱싱된 커밋 이후의 과거 커밋을 추가할 수 있습니다. 예: 이미 100개 인덱싱 → skip_offset=100, limit=50으로 101~150번째 커밋 추가 가능.",
+            "description": "Git 저장소를 Azure AI Search에 인덱싱합니다. skip_offset을 사용하면 이미 인덱싱된 커밋 이후의 과거 커밋을 추가할 수 있습니다. 예: 이미 100개 인덱싱 → skip_offset=100, limit=50으로 101~150번째 커밋 추가 가능. 주의: 날짜 범위(since/until) 사용 시 실제 커밋 존재 여부에 따라 인덱싱 개수가 다를 수 있음. 인덱싱 후 get_repository_info로 실제 결과 확인 권장.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -638,19 +617,28 @@ async def execute_tool(
                 logger.warning(f"Top {arguments['top']} exceeds max {MAX_SEARCH_TOP}, capping")
                 arguments["top"] = MAX_SEARCH_TOP
 
+        import asyncio
+        loop = asyncio.get_event_loop()
+
         if tool_name == "get_commit_count":
-            result = get_commit_count(
-                repo_path=arguments["repo_path"],
-                since=arguments.get("since"),
-                until=arguments.get("until")
+            result = await loop.run_in_executor(
+                None,
+                lambda: get_commit_count(
+                    repo_path=arguments["repo_path"],
+                    since=arguments.get("since"),
+                    until=arguments.get("until")
+                )
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
 
         elif tool_name == "get_commit_summary":
-            result = get_commit_summary(
-                repo_path=arguments["repo_path"],
-                llm_client=openai_client,
-                limit=arguments.get("limit", 50)
+            result = await loop.run_in_executor(
+                None,
+                lambda: get_commit_summary(
+                    repo_path=arguments["repo_path"],
+                    llm_client=openai_client,
+                    limit=arguments.get("limit", 50)
+                )
             )
             return result
 
@@ -735,19 +723,24 @@ async def execute_tool(
                     logger.warning(f"Failed to check indexing status: {e}")
 
             # 검색 실행
-            results = search_commits(
-                query=arguments["query"],
-                search_client=search_client,
-                openai_client=openai_client,
-                top=arguments.get("top", 10),
-                repo_path=repo_path
+            results = await loop.run_in_executor(
+                None,
+                lambda: search_commits(
+                    query=arguments["query"],
+                    search_client=search_client,
+                    openai_client=openai_client,
+                    top=arguments.get("top", 10),
+                    repo_path=repo_path
+                )
             )
 
             # 결과 요약 (페이로드 크기 제한)
             if isinstance(results, list) and len(results) > 0:
                 summary = f"검색 결과: {len(results)}개 커밋 발견\n\n"
                 for i, r in enumerate(results[:10], 1):  # 최대 10개만
-                    summary += f"{i}. {r.get('message', 'N/A')[:100]}... (by {r.get('author', 'N/A')})\n"
+                    commit_id = r.get('commit_id', 'N/A')
+                    short_sha = commit_id[:8] if len(commit_id) >= 8 else commit_id
+                    summary += f"{i}. [{short_sha}] {r.get('message', 'N/A')[:80]}... (by {r.get('author', 'N/A')})\n"
                 if len(results) > 10:
                     summary += f"\n...외 {len(results)-10}개 커밋"
                 return summary
@@ -759,10 +752,13 @@ async def execute_tool(
             if contributor_limit > MAX_CONTRIBUTOR_LIMIT:
                 contributor_limit = MAX_CONTRIBUTOR_LIMIT
 
-            result = analyze_contributors(
-                repo_path=arguments["repo_path"],
-                criteria=arguments.get("criteria"),
-                limit=contributor_limit
+            result = await loop.run_in_executor(
+                None,
+                lambda: analyze_contributors(
+                    repo_path=arguments["repo_path"],
+                    criteria=arguments.get("criteria"),
+                    limit=contributor_limit
+                )
             )
 
             # 결과 요약
@@ -777,10 +773,13 @@ async def execute_tool(
             return json.dumps(result, ensure_ascii=False, indent=2)
 
         elif tool_name == "find_bug_commits":
-            results = find_frequent_bug_commits(
-                repo_path=arguments["repo_path"],
-                llm_client=openai_client,
-                limit=arguments.get("limit", 200)
+            results = await loop.run_in_executor(
+                None,
+                lambda: find_frequent_bug_commits(
+                    repo_path=arguments["repo_path"],
+                    llm_client=openai_client,
+                    limit=arguments.get("limit", 200)
+                )
             )
 
             # 결과 요약
@@ -795,41 +794,120 @@ async def execute_tool(
 
         elif tool_name == "search_github_repo":
             reader = OnlineRepoReader()
-            results = reader.search_github_repo(
-                query=arguments["query"],
-                max_results=arguments.get("max_results", 5)
+            results = await loop.run_in_executor(
+                None,
+                lambda: reader.search_github_repo(
+                    query=arguments["query"],
+                    max_results=arguments.get("max_results", 5)
+                )
             )
-            return json.dumps(results, ensure_ascii=False, indent=2)
+
+            # 결과 요약 (페이로드 크기 제한)
+            if results and len(results) > 0:
+                summary = f"🔍 GitHub 검색 결과: {len(results)}개 저장소\n\n"
+                for i, repo in enumerate(results, 1):
+                    desc = repo.get('description', 'No description')
+                    if len(desc) > 100:
+                        desc = desc[:100] + "..."
+
+                    summary += f"{i}. **{repo.get('full_name', 'N/A')}** ⭐ {repo.get('stars', 0):,}\n"
+                    summary += f"   언어: {repo.get('language', 'N/A')} | {desc}\n"
+                    summary += f"   URL: {repo.get('url', 'N/A')}\n\n"
+
+                return summary
+            elif results is None:
+                return "GitHub 검색에 실패했습니다."
+            else:
+                return "검색 결과가 없습니다."
 
         elif tool_name == "read_file_from_commit":
-            content = read_file_from_commit(
-                repo_path=arguments["repo_path"],
-                commit_sha=arguments["commit_sha"],
-                file_path=arguments["file_path"]
+            content = await loop.run_in_executor(
+                None,
+                lambda: read_file_from_commit(
+                    repo_path=arguments["repo_path"],
+                    commit_sha=arguments["commit_sha"],
+                    file_path=arguments["file_path"]
+                )
             )
             return content if content else "파일을 읽을 수 없습니다."
 
         elif tool_name == "get_file_context":
-            context = get_file_context(
-                repo_path=arguments["repo_path"],
-                commit_sha=arguments["commit_sha"],
-                file_path=arguments["file_path"]
+            context = await loop.run_in_executor(
+                None,
+                lambda: get_file_context(
+                    repo_path=arguments["repo_path"],
+                    commit_sha=arguments["commit_sha"],
+                    file_path=arguments["file_path"]
+                )
             )
-            return json.dumps(context, ensure_ascii=False, indent=2)
+
+            # 결과 요약
+            if context:
+                summary = f"📄 파일 컨텍스트: {context.get('file_path', 'N/A')}\n"
+                summary += f"커밋: {context.get('commit_sha', 'N/A')[:8]}\n"
+                summary += f"변경 타입: {context.get('change_type', 'N/A')}\n"
+
+                if context.get('diff'):
+                    diff_text = context['diff']
+                    if len(diff_text) > 1000:
+                        diff_text = diff_text[:1000] + "\n...(truncated)"
+                    summary += f"\nDiff:\n```\n{diff_text}\n```"
+
+                return summary
+            else:
+                return "파일 컨텍스트를 가져올 수 없습니다."
 
         elif tool_name == "get_commit_diff":
-            diff_info = get_commit_diff(
-                repo_path=arguments["repo_path"],
-                commit_sha=arguments["commit_sha"],
-                max_files=arguments.get("max_files", 10)
+            diff_info = await loop.run_in_executor(
+                None,
+                lambda: get_commit_diff(
+                    repo_path=arguments["repo_path"],
+                    commit_sha=arguments["commit_sha"],
+                    max_files=arguments.get("max_files", 10)
+                )
             )
+
             if diff_info:
-                return json.dumps(diff_info, ensure_ascii=False, indent=2)
+                # 에러인 경우
+                if diff_info.get("error"):
+                    return diff_info["message"]
+
+                # 정상인 경우 - 요약해서 전달
+                summary = f"📝 커밋 Diff: {diff_info.get('short_sha', 'N/A')}\n"
+                summary += f"작성자: {diff_info.get('author', 'N/A')}\n"
+                summary += f"날짜: {diff_info.get('date', 'N/A')}\n"
+                summary += f"메시지: {diff_info.get('message', 'N/A')[:200]}\n\n"
+
+                stats = diff_info.get('stats', {})
+                summary += f"📊 통계: {stats.get('files', 0)}개 파일, "
+                summary += f"+{stats.get('insertions', 0)}/-{stats.get('deletions', 0)} 라인\n\n"
+
+                files_changed = diff_info.get('files_changed', [])
+                if files_changed:
+                    summary += f"📂 변경된 파일 ({len(files_changed)}개):\n"
+                    for i, f in enumerate(files_changed[:5], 1):  # 최대 5개만
+                        summary += f"{i}. {f.get('file', 'N/A')} "
+                        summary += f"(+{f.get('lines_added', 0)}/-{f.get('lines_deleted', 0)})\n"
+
+                        # diff 내용 일부만
+                        if f.get('diff') and len(f['diff']) > 0:
+                            diff_preview = f['diff'][:500]
+                            if len(f['diff']) > 500:
+                                diff_preview += "\n...(truncated)"
+                            summary += f"```diff\n{diff_preview}\n```\n"
+
+                    if len(files_changed) > 5:
+                        summary += f"\n...외 {len(files_changed) - 5}개 파일"
+
+                return summary
             else:
                 return "커밋 diff를 가져올 수 없습니다."
 
         elif tool_name == "get_readme":
-            content = get_readme_content(arguments["repo_path"])
+            content = await loop.run_in_executor(
+                None,
+                lambda: get_readme_content(arguments["repo_path"])
+            )
             return content if content else "README 파일을 찾을 수 없습니다."
 
         elif tool_name == "set_current_repository":
@@ -848,6 +926,45 @@ async def execute_tool(
 
             # 인덱스 생성 (없으면)
             indexer.create_index_if_not_exists()
+
+            # skip_offset 자동 계산 및 limit 조정 (index_limit 계산 이전에 수행)
+            skip_offset = arguments.get("skip_offset", 0)
+            original_limit = arguments.get("limit")  # 사용자가 요청한 원래 limit 저장
+
+            # 사용자가 명시적으로 limit을 요청했고 skip_offset이 명시되지 않은 경우
+            # 날짜 필터가 있어도 증분 인덱싱 로직 적용 (중복 방지)
+            if skip_offset == 0 and original_limit is not None:
+                try:
+                    from src.indexer import normalize_repo_identifier
+                    repo_id = normalize_repo_identifier(arguments["repo_path"])
+
+                    # 기존 인덱싱 개수 확인
+                    check_results = search_client.search(
+                        search_text="*",
+                        filter=f"repo_id eq '{repo_id}'",
+                        select=["id"],
+                        top=10000
+                    )
+                    existing_count = len(list(check_results))
+
+                    if existing_count > 0 and original_limit > existing_count:
+                        logger.info(f"Found {existing_count} existing commits, user requested {original_limit} total")
+
+                        # 사용자가 요청한 총 개수에서 이미 있는 개수를 빼서 실제 필요한 개수 계산
+                        adjusted_limit = original_limit - existing_count
+                        logger.info(f"Adjusting limit: {original_limit} (total requested) - {existing_count} (existing) = {adjusted_limit} (additional needed)")
+
+                        # skip_offset과 limit 모두 조정
+                        skip_offset = existing_count
+                        arguments["skip_offset"] = skip_offset
+                        arguments["limit"] = adjusted_limit
+
+                    elif existing_count >= original_limit:
+                        logger.info(f"Already have {existing_count} commits, user requested {original_limit} total - no additional indexing needed")
+                        arguments["limit"] = 0  # 추가 인덱싱 불필요
+
+                except Exception as e:
+                    logger.warning(f"Failed to calculate incremental indexing: {e}")
 
             # limit이 없으면 DEFAULT_INDEX_LIMIT 사용
             index_limit = arguments.get("limit")
@@ -928,24 +1045,128 @@ async def execute_tool(
                     logger.info(f"User declined large indexing: {index_limit} commits")
                     return f"❌ 사용자가 대용량 인덱싱을 취소했습니다. 더 작은 범위로 다시 시도하거나 날짜 범위를 지정해주세요."
 
-            # 저장소 인덱싱
-            indexed_count = indexer.index_repository(
-                repo_path=arguments["repo_path"],
-                limit=index_limit,
-                since=arguments.get("since"),
-                until=arguments.get("until"),
-                skip_existing=arguments.get("skip_existing", True),
-                skip_offset=arguments.get("skip_offset", 0)
-            )
+            # 분할 인덱싱 필요 여부 확인
+            if index_limit > MAX_COMMIT_LIMIT:
+                # 자동 분할 인덱싱
+                await cl.Message(
+                    content=f"⚠️ {index_limit}개는 한 번에 처리할 수 없어 {MAX_COMMIT_LIMIT}개씩 분할 인덱싱합니다..."
+                ).send()
 
-            # 인덱싱 완료 메시지를 Step 외부에 명확히 표시
-            if indexed_count == 0:
-                logger.info(f"Repository already indexed: {arguments['repo_path']}")
-                await cl.Message(content=f"✅ **인덱싱 확인 완료**\n\n저장소가 이미 인덱싱되어 있습니다.\n저장소: `{arguments['repo_path']}`").send()
-                return f"저장소가 이미 인덱싱되어 있습니다. 검색 및 분석을 바로 시작할 수 있습니다."
+                total_indexed = 0
+                current_skip = arguments.get("skip_offset", 0)
+                remaining = index_limit
+                batch_num = 0
+
+                while remaining > 0:
+                    batch_num += 1
+                    batch_size = min(remaining, MAX_COMMIT_LIMIT)
+
+                    progress_msg = await cl.Message(
+                        content=f"🔄 배치 {batch_num}: {current_skip}~{current_skip + batch_size - 1} 인덱싱 중..."
+                    ).send()
+
+                    # 배치 인덱싱 (비동기)
+                    batch_count = await loop.run_in_executor(
+                        None,
+                        lambda skip=current_skip, size=batch_size: indexer.index_repository(
+                            repo_path=arguments["repo_path"],
+                            limit=size,
+                            since=arguments.get("since"),
+                            until=arguments.get("until"),
+                            skip_existing=arguments.get("skip_existing", True),
+                            skip_offset=skip
+                        )
+                    )
+
+                    total_indexed += batch_count
+                    current_skip += batch_size
+                    remaining -= batch_size
+
+                    progress_msg.content = f"✅ 배치 {batch_num} 완료: {batch_count}개 인덱싱됨 (누적: {total_indexed}개)"
+                    await progress_msg.update()
+
+                    if batch_count == 0:
+                        logger.warning(f"Batch {batch_num} returned 0 commits, stopping")
+                        break
+
+                # 최종 결과
+                final_msg = f"✅ **분할 인덱싱 완료**\n\n"
+                final_msg += f"총 {total_indexed:,}개의 커밋이 {batch_num}개 배치로 인덱싱되었습니다.\n"
+                final_msg += f"저장소: `{arguments['repo_path']}`"
+                await cl.Message(content=final_msg).send()
+
+                return f"{total_indexed}개 커밋이 성공적으로 인덱싱되었습니다. ({batch_num}개 배치)"
+
             else:
-                await cl.Message(content=f"✅ **인덱싱 완료**\n\n{indexed_count:,}개의 커밋이 성공적으로 인덱싱되었습니다.\n저장소: `{arguments['repo_path']}`").send()
-                return f"{indexed_count}개 커밋이 인덱싱되었습니다. 이제 검색, 분석 등 모든 기능을 사용할 수 있습니다."
+                # 일반 인덱싱 (단일 배치)
+                indexed_count = await loop.run_in_executor(
+                    None,
+                    lambda: indexer.index_repository(
+                        repo_path=arguments["repo_path"],
+                        limit=index_limit,
+                        since=arguments.get("since"),
+                        until=arguments.get("until"),
+                        skip_existing=arguments.get("skip_existing", True),
+                        skip_offset=arguments.get("skip_offset", 0)
+                    )
+                )
+
+                # 인덱싱 완료 메시지를 Step 외부에 명확히 표시
+                if indexed_count == 0:
+                    logger.info(f"Repository already indexed: {arguments['repo_path']}")
+                    await cl.Message(content=f"✅ **인덱싱 확인 완료**\n\n저장소가 이미 인덱싱되어 있습니다.\n저장소: `{arguments['repo_path']}`").send()
+                    return f"저장소가 이미 인덱싱되어 있습니다. 검색 및 분석을 바로 시작할 수 있습니다."
+                else:
+                    # 날짜 범위 인덱싱인 경우 실제 결과 검증
+                    result_msg = f"{indexed_count}개 커밋이 인덱싱되었습니다."
+
+                    if arguments.get("since") or arguments.get("until"):
+                        # 날짜 범위 인덱싱의 경우 실제 인덱싱된 날짜 범위 확인
+                        try:
+                            from src.indexer import normalize_repo_identifier
+                            repo_id = normalize_repo_identifier(arguments["repo_path"])
+
+                            # 인덱싱된 실제 날짜 범위 조회
+                            date_check_results = search_client.search(
+                                search_text="*",
+                                filter=f"repo_id eq '{repo_id}'",
+                                select=["date"],
+                                order_by=["date asc"],
+                                top=1
+                            )
+                            oldest_result = list(date_check_results)
+
+                            date_check_results = search_client.search(
+                                search_text="*",
+                                filter=f"repo_id eq '{repo_id}'",
+                                select=["date"],
+                                order_by=["date desc"],
+                                top=1
+                            )
+                            newest_result = list(date_check_results)
+
+                            if oldest_result and newest_result:
+                                oldest_date = oldest_result[0]["date"][:10]  # YYYY-MM-DD만
+                                newest_date = newest_result[0]["date"][:10]
+
+                                requested_range = f"{arguments.get('since', '시작')} ~ {arguments.get('until', '끝')}"
+                                actual_range = f"{oldest_date} ~ {newest_date}"
+
+                                result_msg += f"\n\n**날짜 범위 검증**:\n"
+                                result_msg += f"- 요청한 범위: {requested_range}\n"
+                                result_msg += f"- 실제 인덱싱된 범위: {actual_range}\n"
+
+                                # 요청 범위와 실제 범위가 다른 경우 안내
+                                if arguments.get("since") and arguments.get("since") != oldest_date:
+                                    result_msg += f"- ⚠️ 요청한 시작일({arguments.get('since')})에는 커밋이 없어서 {oldest_date}부터 시작됨\n"
+                                if arguments.get("until") and arguments.get("until") != newest_date:
+                                    result_msg += f"- ⚠️ 요청한 종료일({arguments.get('until')})에는 커밋이 없어서 {newest_date}까지만 포함됨\n"
+
+                        except Exception as e:
+                            logger.warning(f"Failed to verify date range: {e}")
+
+                    await cl.Message(content=f"✅ **인덱싱 완료**\n\n{result_msg}\n\n저장소: `{arguments['repo_path']}`").send()
+                    return result_msg
 
         elif tool_name == "get_index_statistics":
             index_manager = IndexManager(
@@ -953,7 +1174,10 @@ async def execute_tool(
                 index_client=index_client,
                 index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
             )
-            stats = index_manager.get_index_statistics()
+            stats = await loop.run_in_executor(
+                None,
+                lambda: index_manager.get_index_statistics()
+            )
             formatted = format_index_statistics(stats)
             return formatted
 
@@ -963,7 +1187,10 @@ async def execute_tool(
                 index_client=index_client,
                 index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
             )
-            repos = index_manager.list_indexed_repositories()
+            repos = await loop.run_in_executor(
+                None,
+                lambda: index_manager.list_indexed_repositories()
+            )
 
             if not repos:
                 return "인덱싱된 저장소가 없습니다."
@@ -984,7 +1211,10 @@ async def execute_tool(
                 index_client=index_client,
                 index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
             )
-            info = index_manager.get_repository_info(arguments["repo_id"])
+            info = await loop.run_in_executor(
+                None,
+                lambda: index_manager.get_repository_info(arguments["repo_id"])
+            )
 
             if not info:
                 return f"저장소 정보를 찾을 수 없습니다: {arguments['repo_id']}"
@@ -1010,7 +1240,10 @@ async def execute_tool(
                 index_client=index_client,
                 index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
             )
-            deleted_count = index_manager.delete_repository_commits(arguments["repo_id"])
+            deleted_count = await loop.run_in_executor(
+                None,
+                lambda: index_manager.delete_repository_commits(arguments["repo_id"])
+            )
             return f"✓ {deleted_count}개 커밋이 삭제되었습니다. (Repo ID: {arguments['repo_id']})"
 
         elif tool_name == "check_index_health":
@@ -1019,7 +1252,10 @@ async def execute_tool(
                 index_client=index_client,
                 index_name=os.getenv("AZURE_SEARCH_INDEX_NAME", "git-commits")
             )
-            health = index_manager.check_index_health()
+            health = await loop.run_in_executor(
+                None,
+                lambda: index_manager.check_index_health()
+            )
 
             status_emoji = "✅" if health["status"] == "healthy" else "⚠️" if health["status"] == "degraded" else "❌"
 

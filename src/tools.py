@@ -48,10 +48,11 @@ def get_commit_count(
     until: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    저장소의 총 커밋 개수를 확인합니다 (GitPython으로 빠르게).
+    저장소의 총 커밋 개수를 확인합니다.
+    캐시된 저장소에서 정확한 개수를 조회합니다.
 
     Args:
-        repo_path: Git 저장소 경로
+        repo_path: Git 저장소 경로 또는 URL
         since: 시작 날짜 (ISO 8601 형식, 예: '2024-01-01')
         until: 종료 날짜 (ISO 8601 형식, 예: '2024-12-31')
 
@@ -61,15 +62,59 @@ def get_commit_count(
     try:
         logger.info(f"Counting commits for {repo_path} (since={since}, until={until})")
 
+        # 원격 저장소인 경우
+        if repo_path.startswith(('http://', 'https://', 'git@')):
+            # 캐시된 클론 사용 (정확한 개수)
+            logger.info("Using cached repository for accurate commit count...")
+            from src.repo_cache import RepoCloneCache
+
+            cache = RepoCloneCache()
+
+            # 날짜 필터가 있으면 충분한 depth 필요
+            if since or until:
+                # 날짜 필터가 있으면 더 깊게 fetch
+                cached_path = cache.get_or_clone(repo_path, depth=1000)
+            else:
+                # 날짜 필터 없으면 shallow clone으로 충분
+                cached_path = cache.get_or_clone(repo_path)
+
+            # 캐시된 저장소에서 커밋 개수 조회
+            import git
+            repo = git.Repo(cached_path)
+
+            args = ['--count', 'HEAD']
+            if since:
+                args.append(f'--since={since}')
+            if until:
+                args.append(f'--until={until}')
+
+            count = int(repo.git.rev_list(*args))
+            repo.close()
+
+            period_text = ""
+            if since and until:
+                period_text = f" ({since} ~ {until})"
+            elif since:
+                period_text = f" ({since} 이후)"
+            elif until:
+                period_text = f" ({until} 이전)"
+
+            logger.info(f"✓ Cached repo: {count:,} commits{period_text}")
+            return {
+                "repo_path": repo_path,
+                "commit_count": count,
+                "since": since,
+                "until": until,
+                "method": "cached_clone",
+                "message": f"총 {count:,}개 커밋{period_text}"
+            }
+
+        # 로컬 저장소인 경우 - 기존 방식 유지
         generator = DocumentGenerator(repo_path)
         try:
-            # GitPython으로 커밋 개수만 빠르게 세기
             repo = generator.repo
-
-            # git rev-list 명령 구성
             args = ['--count', 'HEAD']
 
-            # 날짜 범위 추가
             if since:
                 args.append(f'--since={since}')
             if until:
@@ -77,7 +122,6 @@ def get_commit_count(
 
             commit_count = int(repo.git.rev_list(*args))
 
-            # 메시지 구성
             period_text = ""
             if since and until:
                 period_text = f" ({since} ~ {until})"
@@ -91,6 +135,7 @@ def get_commit_count(
                 "commit_count": commit_count,
                 "since": since,
                 "until": until,
+                "method": "local",
                 "message": f"총 {commit_count:,}개 커밋{period_text}"
             }
         finally:
