@@ -184,8 +184,17 @@ class CommitIndexer:
         try:
             # 저장소 식별자 생성
             repo_id = normalize_repo_identifier(repo_path)
-            logger.info(f"Starting repository indexing: {repo_path} (repo_id: {repo_id})")
-            logger.info(f"Options - limit: {limit}, since: {since}, until: {until}, skip_existing: {skip_existing}, skip_offset: {skip_offset}")
+
+            # 📊 인덱싱 조건 요약 로그
+            logger.info("=" * 80)
+            logger.info("📊 INDEXING REQUEST SUMMARY")
+            logger.info(f"  📁 Repository: {repo_path}")
+            logger.info(f"  🔑 Repo ID: {repo_id}")
+            logger.info(f"  📈 Limit: {limit if limit else 'ALL commits'}")
+            logger.info(f"  📅 Date Range: {since or 'start'} ~ {until or 'end'}")
+            logger.info(f"  🔄 Skip Existing: {skip_existing}")
+            logger.info(f"  ⏭️  Skip Offset: {skip_offset}")
+            logger.info("=" * 80)
 
             # 이미 인덱싱된 커밋 ID 가져오기 (증분 인덱싱)
             # 같은 저장소의 커밋만 확인
@@ -196,7 +205,7 @@ class CommitIndexer:
                         search_text="*",
                         filter=f"repo_id eq '{repo_id}'",  # 같은 저장소의 커밋만 필터링
                         select=["id"],
-                        top=10000  # 최대 10000개까지 확인
+                        top=100  # 최대 10000개까지 확인
                     )
                     existing_commit_ids = {result["id"] for result in results}
                     logger.info(f"Found {len(existing_commit_ids)} existing commits for this repository in index")
@@ -352,7 +361,13 @@ Functions: {'; '.join(func_changes) if func_changes else 'No function changes'}"
             result = self.search_client.upload_documents(documents=documents)
 
             success_count = sum(1 for r in result if r.succeeded)
-            logger.info(f"✓ Successfully indexed {success_count}/{len(documents)} commits")
+
+            logger.info("=" * 80)
+            logger.info(f"✅ INDEXING COMPLETED")
+            logger.info(f"  📊 Successfully indexed: {success_count}/{len(documents)} documents")
+            logger.info(f"  📁 Repository: {repo_path}")
+            logger.info(f"  🔑 Repo ID: {repo_id}")
+            logger.info("=" * 80)
 
             return success_count
 

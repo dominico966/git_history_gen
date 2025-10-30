@@ -180,17 +180,26 @@ class DocumentGenerator:
 
             logger.info(f"Extracting commits from {branch} (limit: {limit}, since: {since}, until: {until}, skip: {skip})")
 
-            # skip이 크면 더 깊게 fetch 필요
-            if skip > 0 and self.is_remote and self.cached_path and self.repo_url:
-                required_depth = skip + (limit if limit else 100)
-                logger.info(f"Skip offset {skip} detected, ensuring depth >= {required_depth}")
+            # 날짜 범위 또는 skip이 지정된 경우 더 깊게 fetch 필요
+            if self.is_remote and self.cached_path and self.repo_url:
+                fetch_depth = None  # 기본값 (fetch 안 함)
 
-                from src.repo_cache import RepoCloneCache
-                cache = RepoCloneCache()
-                # 필요한 만큼 깊게 fetch
-                cache.get_or_clone(self.repo_url, depth=required_depth)
-                # 저장소 reload
-                self.repo = git.Repo(self.cached_path)
+                if skip > 0:
+                    # skip offset이 있으면 충분한 depth 필요
+                    fetch_depth = skip + (limit if limit else 100)
+                    logger.info(f"Skip offset {skip} detected, ensuring depth >= {fetch_depth}")
+                elif since or until:
+                    # 날짜 범위가 지정된 경우, 충분히 깊게 fetch (최대 1000개)
+                    fetch_depth = 1000
+                    logger.info(f"Date range specified, fetching deeper (depth={fetch_depth})")
+
+                if fetch_depth:
+                    from src.repo_cache import RepoCloneCache
+                    cache = RepoCloneCache()
+                    # 필요한 만큼 깊게 fetch
+                    cache.get_or_clone(self.repo_url, depth=fetch_depth)
+                    # 저장소 reload
+                    self.repo = git.Repo(self.cached_path)
 
             # 날짜 필터링 옵션 설정
             kwargs = {'max_count': limit} if limit else {}

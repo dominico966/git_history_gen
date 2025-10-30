@@ -38,6 +38,9 @@ from src.indexer import CommitIndexer
 from azure.search.documents.indexes import SearchIndexClient
 from src.index_manager import IndexManager, format_index_statistics
 
+from datetime import datetime
+TODAY=datetime.today().strftime('%Y-%m-%d')
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,7 +59,7 @@ MAX_CONVERSATION_MESSAGES = 20  # 시스템 프롬프트 + 최근 N개 메시지
 # ----- 프롬프트 정의 (여러 줄 문자열 금지) -----
 SYSTEM_PROMPT_PARTS = [
     # 날짜는 실행 시 주입됨
-    "Git 히스토리 분석 전문가. 오늘: {TODAY}",
+    f"Git 히스토리 분석 전문가. 오늘: {TODAY}",
     "",
     "# 핵심 규칙",
     "- 한국어 구조화된 답변. 확인 질문 금지",
@@ -70,8 +73,28 @@ SYSTEM_PROMPT_PARTS = [
     "4. **중요**: 인덱싱수 < 전체수 → 추가 필요. '전부' 요청시 100% 완료까지",
     "5. 규모별: ~100(기본), 100~500(skip_offset), 500+(날짜범위)",
     "",
+    "# 증분 인덱싱 결과 해석",
+    "- 로그에 'Skipped N already indexed commits' 표시 → **정상 동작**",
+    "- 이미 인덱싱된 커밋은 자동으로 건너뛰고, 새로운 커밋만 인덱싱함",
+    "- 예: 436개 추출 → 100개 건너뜀 → 336개 인덱싱 = **336개 추가됨**",
+    "- 사용자에게는 **새로 추가된 개수**와 **전체 인덱싱 현황**을 함께 설명",
+    "",
+    "# '전체' 인덱싱 요청 처리",
+    "- **'전부', '다 해', '전체', '모든' 등의 요청 시**:",
+    "  1. get_commit_count로 전체 커밋 개수(N) 확인",
+    "  2. list_indexed_repositories로 이미 인덱싱된 개수(M) 확인",
+    "  3. index_repository 호출 시 limit=N 설정 (증분 인덱싱 자동 적용됨)",
+    "  4. 완료 후 실제 인덱싱된 개수 확인 및 검증",
+    "- **절대 limit 없이 호출하지 말 것** (기본값 100개만 처리됨)",
+    "",
+    "# 자연어 인덱싱 요청",
+    "- **'올해', '2025년'**: since=2025-01-01, until=2025-12-31 자동 설정",
+    "- **'최근'**: limit=500 권장",
+    "- **날짜 지정**: since/until 파라미터 사용 (YYYY-MM-DD)",
+    "- UI에서도 키워드 입력 가능: '올해', '전체', '최근', 날짜",
+    "",
     "# 필수 판단 원칙",
-    "- **추측 금지**: get_commit_count ↔ get_repository_info 비교 필수",
+    "- **추측 금지**: get_commit_count ↔ list_indexed_repositories 비교 필수",
     "- 부분 인덱싱 → 추가 작업, 완전 인덱싱 → \"이미 있음\" 가능",
     "- 날짜범위 후 실제 결과 검증",
     "",
@@ -184,7 +207,7 @@ AVAILABLE_TOOLS = [
         "type": "function",
         "function": {
             "name": "analyze_contributors",
-            "description": "기여자별 활동을 분석합니다. 커밋 수, 변경 라인 수, 최근 활동 등을 제공합니다.",
+            "description": "기여자별 활동을 분석합니다. 커밋 수, 변경 라인 수, 최근 활동 등을 제공합니다. 날짜 범위를 지정하여 특정 기간의 기여자 활동만 분석할 수 있습니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -199,6 +222,14 @@ AVAILABLE_TOOLS = [
                     "limit": {
                         "type": "integer",
                         "description": "분석할 커밋 수 (선택적)"
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "시작 날짜 (ISO 8601 형식, 예: 2024-01-01). 이 날짜 이후의 커밋만 분석합니다."
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "종료 날짜 (ISO 8601 형식, 예: 2024-12-31). 이 날짜 이전의 커밋만 분석합니다."
                     }
                 },
                 "required": ["repo_path"]
@@ -630,11 +661,18 @@ async def execute_tool(
                 elif resolved_path is None:
                     return f"❌ '{repo_path}'와 일치하는 인덱싱된 저장소를 찾을 수 없습니다. 정확한 경로를 입력하거나 먼저 저장소를 인덱싱해주세요."
 
-        # 안전 장치: 최대값 제한 적용
+        # 안전 장치: 최대값 제한 적용 (index_repository는 제외)
+        # ⚠️ index_repository의 limit은 증분 인덱싱 로직에서 처리하므로 여기서는 경고만 로그
         if "limit" in arguments and arguments["limit"]:
-            if arguments["limit"] > MAX_COMMIT_LIMIT:
-                logger.warning(f"Limit {arguments['limit']} exceeds max {MAX_COMMIT_LIMIT}, capping")
-                arguments["limit"] = MAX_COMMIT_LIMIT
+            if tool_name == "index_repository":
+                # index_repository는 경고만 로그, cap 안 함
+                if arguments["limit"] > MAX_COMMIT_LIMIT:
+                    logger.warning(f"⚠️ Large limit requested: {arguments['limit']} (recommended max: {MAX_COMMIT_LIMIT})")
+            else:
+                # 다른 도구는 cap 적용
+                if arguments["limit"] > MAX_COMMIT_LIMIT:
+                    logger.warning(f"Limit {arguments['limit']} exceeds max {MAX_COMMIT_LIMIT}, capping")
+                    arguments["limit"] = MAX_COMMIT_LIMIT
 
         if "top" in arguments and arguments["top"]:
             if arguments["top"] > MAX_SEARCH_TOP:
@@ -781,16 +819,26 @@ async def execute_tool(
                 lambda: analyze_contributors(
                     repo_path=arguments["repo_path"],
                     criteria=arguments.get("criteria"),
-                    limit=contributor_limit
+                    limit=contributor_limit,
+                    since=arguments.get("since"),
+                    until=arguments.get("until")
                 )
             )
 
             # 결과 요약
             if isinstance(result, dict) and 'contributors' in result:
                 contributors = result['contributors']
-                summary = f"👥 기여자 분석 결과: 총 {len(contributors)}명\n\n"
+                date_info = ""
+                if arguments.get("since") or arguments.get("until"):
+                    date_parts = []
+                    if arguments.get("since"):
+                        date_parts.append(f"{arguments['since']} 이후")
+                    if arguments.get("until"):
+                        date_parts.append(f"{arguments['until']} 이전")
+                    date_info = f" ({', '.join(date_parts)})"
+                summary = f"👥 기여자 분석 결과{date_info}: 총 {len(contributors)}명\n\n"
                 for i, c in enumerate(contributors[:10], 1):  # 최대 10명
-                    summary += f"{i}. {c.get('name', 'N/A')}: {c.get('commit_count', 0)}개 커밋\n"
+                    summary += f"{i}. {c.get('name', 'N/A')}: {c.get('commits', 0)}개 커밋, {c.get('total_lines_changed', 0)}줄 변경\n"
                 if len(contributors) > 10:
                     summary += f"\n...외 {len(contributors)-10}명"
                 return summary
@@ -951,13 +999,24 @@ async def execute_tool(
             # 인덱스 생성 (없으면)
             indexer.create_index_if_not_exists()
 
-            # skip_offset 자동 계산 및 limit 조정 (index_limit 계산 이전에 수행)
+            # ⚠️ 증분 인덱싱 로직 - cap되지 않은 원래 limit 값 사용
             skip_offset = arguments.get("skip_offset", 0)
-            original_limit = arguments.get("limit")  # 사용자가 요청한 원래 limit 저장
+            original_limit = arguments.get("limit")  # ✅ cap 이전의 원래 값
 
-            # 사용자가 명시적으로 limit을 요청했고 skip_offset이 명시되지 않은 경우
-            # 날짜 필터가 있어도 증분 인덱싱 로직 적용 (중복 방지)
-            if skip_offset == 0 and original_limit is not None:
+            # ⚠️ 증분 인덱싱 조건:
+            # 1. skip_offset이 명시되지 않음 (0)
+            # 2. 사용자가 명시적으로 limit을 요청함
+            # 3. skip_existing=True (기본값)
+            # 4. 날짜 범위가 없음 (날짜 범위가 있으면 증분 인덱싱 불가)
+            should_apply_incremental = (
+                skip_offset == 0 and
+                original_limit is not None and
+                arguments.get("skip_existing", True) and
+                not arguments.get("since") and
+                not arguments.get("until")
+            )
+
+            if should_apply_incremental:
                 try:
                     from src.indexer import normalize_repo_identifier
                     repo_id = normalize_repo_identifier(arguments["repo_path"])
@@ -971,33 +1030,38 @@ async def execute_tool(
                     )
                     existing_count = len(list(check_results))
 
-                    if existing_count > 0 and original_limit > existing_count:
+                    if existing_count > 0:
                         logger.info(f"Found {existing_count} existing commits, user requested {original_limit} total")
 
-                        # 사용자가 요청한 총 개수에서 이미 있는 개수를 빼서 실제 필요한 개수 계산
-                        adjusted_limit = original_limit - existing_count
-                        logger.info(f"Adjusting limit: {original_limit} (total requested) - {existing_count} (existing) = {adjusted_limit} (additional needed)")
+                        if original_limit > existing_count:
+                            # 사용자가 요청한 총 개수에서 이미 있는 개수를 빼서 실제 필요한 개수 계산
+                            adjusted_limit = original_limit - existing_count
+                            logger.info(f"Adjusting limit: {original_limit} (total requested) - {existing_count} (existing) = {adjusted_limit} (additional needed)")
 
-                        # skip_offset과 limit 모두 조정
-                        skip_offset = existing_count
-                        arguments["skip_offset"] = skip_offset
-                        arguments["limit"] = adjusted_limit
+                            # skip_offset과 limit 모두 조정
+                            skip_offset = existing_count
+                            arguments["skip_offset"] = skip_offset
+                            arguments["limit"] = adjusted_limit
 
-                    elif existing_count >= original_limit:
-                        logger.info(f"Already have {existing_count} commits, user requested {original_limit} total - no additional indexing needed")
-                        arguments["limit"] = 0  # 추가 인덱싱 불필요
+                        elif original_limit <= existing_count:
+                            # 이미 충분한 커밋이 있음
+                            logger.info(f"Already have {existing_count} commits (>= {original_limit} requested) - no additional indexing needed")
+                            # 인덱싱을 건너뛰고 바로 완료 메시지 반환
+                            return f"✅ 저장소에 이미 {existing_count:,}개 커밋이 인덱싱되어 있습니다. (요청: {original_limit:,}개)\n추가 인덱싱이 필요하지 않습니다."
 
                 except Exception as e:
                     logger.warning(f"Failed to calculate incremental indexing: {e}")
 
+            # ✅ 증분 인덱싱 계산 완료 후 limit 설정
             # limit이 없으면 DEFAULT_INDEX_LIMIT 사용
             index_limit = arguments.get("limit")
             if index_limit is None:
                 logger.warning(f"No limit specified for indexing, defaulting to {DEFAULT_INDEX_LIMIT}")
                 index_limit = DEFAULT_INDEX_LIMIT
-            elif index_limit > MAX_COMMIT_LIMIT:
-                logger.warning(f"Index limit {index_limit} exceeds max, capping to {MAX_COMMIT_LIMIT}")
-                index_limit = MAX_COMMIT_LIMIT
+
+            # ⚠️ MAX_COMMIT_LIMIT은 권장 사항일 뿐, 강제하지 않음 (증분 인덱싱 지원)
+            if index_limit > MAX_COMMIT_LIMIT:
+                logger.warning(f"⚠️ Large indexing: {index_limit} commits (recommended max: {MAX_COMMIT_LIMIT})")
 
             # 대용량 인덱싱(DEFAULT_INDEX_LIMIT개 이상)이면 사용자 확인
             if index_limit >= DEFAULT_INDEX_LIMIT:
@@ -1007,11 +1071,40 @@ async def execute_tool(
                 if since_param or until_param:
                     date_info = f"\n**날짜 범위**: {since_param or '시작'} ~ {until_param or '끝'}"
 
+                # 📊 전체 커밋 수를 확인 (UI에 표시하기 위해)
+                commit_info_msg = await cl.Message(content="📊 저장소 커밋 수를 확인하는 중...").send()
+                try:
+                    total_commit_info = await loop.run_in_executor(
+                        None,
+                        lambda: get_commit_count(
+                            repo_path=arguments["repo_path"],
+                            since=since_param or None,
+                            until=until_param or None
+                        )
+                    )
+                    total_commits = total_commit_info.get("commit_count", 0)
+                    commit_info_msg.content = f"📊 전체 커밋 수: **{total_commits:,}개**"
+                    await commit_info_msg.update()
+                except Exception as e:
+                    logger.warning(f"Failed to get total commit count: {e}")
+                    total_commits = None
+                    commit_info_msg.content = f"⚠️ 전체 커밋 수를 확인할 수 없습니다."
+                    await commit_info_msg.update()
+
+                # UI 메시지 준비
+                ui_content = f"⚠️ 대용량 인덱싱 요청\n\n**저장소**: {arguments['repo_path']}\n"
+                if total_commits is not None:
+                    ui_content += f"**전체 커밋 수**: {total_commits:,}개\n"
+                ui_content += f"**인덱싱 예정**: {index_limit}개 커밋{date_info}\n\n진행 방법을 선택하세요:"
+
+                # 사용자 확인 대기 메시지 (Step 외부에 표시)
+                await cl.Message(content="⏸️ 사용자 확인을 기다리는 중입니다...").send()
+
                 res = await cl.AskActionMessage(
-                    content=f"⚠️ 대용량 인덱싱 요청\n\n**저장소**: {arguments['repo_path']}\n**인덱싱 예정**: {index_limit}개 커밋{date_info}\n\n진행 방법을 선택하세요:",
+                    content=ui_content,
                     actions=[
                         cl.Action(name="proceed", payload={"action": "proceed"}, label="✅ 그대로 진행"),
-                        cl.Action(name="custom", payload={"action": "custom"}, label="✏️ 개수/날짜 변경"),
+                        cl.Action(name="custom", payload={"action": "custom", "total_commits": total_commits}, label="✏️ 개수/날짜 변경"),
                         cl.Action(name="cancel", payload={"action": "cancel"}, label="❌ 취소"),
                     ],
                     timeout=120,  # 2분
@@ -1028,169 +1121,197 @@ async def execute_tool(
                     await cl.Message(content=f"✅ 사용자 승인됨. {index_limit}개 커밋 인덱싱을 시작합니다...").send()
 
                 elif action == "custom":
+                    # 전체 커밋 수 정보를 UI에 표시
+                    total_commits_from_payload = res.get("payload", {}).get("total_commits")
+                    total_info_text = ""
+                    if total_commits_from_payload is not None and total_commits_from_payload > 0:
+                        total_info_text = f"\n\n**전체 커밋 수**: {total_commits_from_payload:,}개 (전체 인덱싱을 원하시면 이 숫자를 입력하세요)"
+
                     # 사용자 정의 개수 입력 받기
                     custom_limit_res = await cl.AskUserMessage(
-                        content=f"📝 인덱싱할 커밋 개수를 입력하세요 (최대 {MAX_COMMIT_LIMIT}개):",
+                        content=f"📝 인덱싱할 커밋 개수 또는 범위를 입력하세요:\n\n"
+                                f"• **숫자**: 예) 500, 1000\n"
+                                f"• **키워드**: '전체', '올해', '최근'\n"
+                                f"• **날짜**: 2025-01-01 또는 2025-01-01,2025-12-31\n\n"
+                                f"전체 커밋 수: {total_commits_from_payload:,}개\n"
+                                f"⚠️ {MAX_COMMIT_LIMIT}개 이상은 시간이 오래 걸릴 수 있습니다.",
                         timeout=60,
                         raise_on_timeout=False
                     ).send()
 
-                    if not custom_limit_res:
-                        return "⏱️ 시간 초과. 인덱싱을 취소했습니다."
+                    if not custom_limit_res or not custom_limit_res.get("output"):
+                        return "⏱️ 시간 초과 또는 입력 없음. 인덱싱을 취소했습니다."
 
-                    if custom_limit_res.get("output"):
-                        try:
-                            custom_limit = int(custom_limit_res.get("output").strip())
-                            if 1 <= custom_limit <= MAX_COMMIT_LIMIT:
-                                index_limit = custom_limit
+                    try:
+                        user_input = custom_limit_res.get("output").strip().lower()
+                        import re
+                        from datetime import datetime
+
+                        # 🔍 키워드 처리
+                        if any(keyword in user_input for keyword in ['전체', '모두', 'all']):
+                            # 전체 커밋
+                            index_limit = total_commits_from_payload if total_commits_from_payload else None
+                            logger.info(f"User requested 'all': {index_limit}")
+                            arguments["limit"] = index_limit
+
+                        elif any(keyword in user_input for keyword in ['올해', '2025', 'this year']):
+                            # 올해 커밋
+                            arguments["since"] = "2025-01-01"
+                            arguments["until"] = "2025-12-31"
+                            index_limit = None  # 날짜 범위로 제한
+                            logger.info("User requested 'this year': 2025-01-01 ~ 2025-12-31")
+                            await cl.Message(content="📅 올해(2025년) 커밋으로 설정되었습니다.").send()
+
+                        elif any(keyword in user_input for keyword in ['최근', 'recent']):
+                            # 최근 500개
+                            index_limit = 500
+                            logger.info("User requested 'recent': 500")
+                            arguments["limit"] = index_limit
+
+                        elif ',' in user_input or re.match(r'\d{4}-\d{2}-\d{2}', user_input):
+                            # 날짜 범위 형식
+                            if ',' in user_input:
+                                parts = user_input.split(',')
+                                if len(parts) == 2:
+                                    arguments["since"] = parts[0].strip()
+                                    arguments["until"] = parts[1].strip()
+                                    index_limit = None
+                                    logger.info(f"User provided date range: {parts[0]} ~ {parts[1]}")
+                                    await cl.Message(content=f"📅 날짜 범위: {parts[0]} ~ {parts[1]}").send()
                             else:
-                                return f"❌ 유효하지 않은 개수입니다. 1~{MAX_COMMIT_LIMIT} 사이의 값을 입력해주세요."
-                        except ValueError:
-                            return f"❌ 숫자를 입력해주세요."
+                                # 단일 날짜 (since만)
+                                arguments["since"] = user_input.strip()
+                                index_limit = None
+                                logger.info(f"User provided start date: {user_input}")
+                                await cl.Message(content=f"📅 시작일: {user_input}").send()
+                        else:
+                            # 숫자 추출
+                            numeric_input = re.sub(r'[^\d]', '', user_input)
 
-                    # 날짜 범위 입력 받기
-                    date_res = await cl.AskUserMessage(
-                        content="📅 날짜 범위를 입력하세요 (형식: YYYY-MM-DD,YYYY-MM-DD 또는 빈칸으로 건너뛰기):\n\n예: 2024-01-01,2024-12-31",
-                        timeout=60,
-                        raise_on_timeout=False
-                    ).send()
+                            if not numeric_input:
+                                return "❌ 유효한 숫자, 키워드, 또는 날짜를 입력해주세요.\n예: 500, '올해', 2025-01-01"
 
-                    if date_res and date_res.get("output") and date_res.get("output").strip():
-                        date_input = date_res.get("output").strip()
-                        if "," in date_input:
-                            parts = date_input.split(",")
-                            if len(parts) == 2:
-                                arguments["since"] = parts[0].strip() or None
-                                arguments["until"] = parts[1].strip() or None
+                            custom_limit = int(numeric_input)
 
-                    await cl.Message(content=f"✅ 설정 완료. {index_limit}개 커밋 인덱싱을 시작합니다...").send()
+                            if custom_limit < 1:
+                                return "❌ 1개 이상의 커밋을 입력해주세요."
+
+                            index_limit = custom_limit
+                            logger.info(f"User selected custom limit: {index_limit}")
+                            arguments["limit"] = index_limit
+
+                    except Exception as e:
+                        logger.error(f"Error parsing user input: {e}")
+                        return f"❌ 입력 형식 오류: {str(e)}\n예: 500, '올해', 2025-01-01,2025-12-31"
+
+                    # 날짜 범위 입력 받기 (이미 설정되지 않은 경우만)
+                    if not arguments.get("since") and not arguments.get("until"):
+                        date_res = await cl.AskUserMessage(
+                            content="📅 날짜 범위를 입력하세요 (형식: YYYY-MM-DD,YYYY-MM-DD 또는 빈칸으로 건너뛰기):\n\n예: 2024-01-01,2024-12-31",
+                            timeout=60,
+                            raise_on_timeout=False
+                        ).send()
+
+                        if date_res and date_res.get("output") and date_res.get("output").strip():
+                            date_input = date_res.get("output").strip()
+                            if "," in date_input:
+                                parts = date_input.split(",")
+                                if len(parts) == 2:
+                                    arguments["since"] = parts[0].strip() or None
+                                    arguments["until"] = parts[1].strip() or None
+
+                    await cl.Message(content=f"✅ 설정 완료. {index_limit:,}개 커밋 인덱싱을 시작합니다...").send()
 
                 else:  # cancel
                     logger.info(f"User declined large indexing: {index_limit} commits")
                     return f"❌ 사용자가 대용량 인덱싱을 취소했습니다. 더 작은 범위로 다시 시도하거나 날짜 범위를 지정해주세요."
 
-            # 분할 인덱싱 필요 여부 확인
-            if index_limit > MAX_COMMIT_LIMIT:
-                # 자동 분할 인덱싱
-                await cl.Message(
-                    content=f"⚠️ {index_limit}개는 한 번에 처리할 수 없어 {MAX_COMMIT_LIMIT}개씩 분할 인덱싱합니다..."
-                ).send()
-
-                total_indexed = 0
-                current_skip = arguments.get("skip_offset", 0)
-                remaining = index_limit
-                batch_num = 0
-
-                while remaining > 0:
-                    batch_num += 1
-                    batch_size = min(remaining, MAX_COMMIT_LIMIT)
-
-                    progress_msg = await cl.Message(
-                        content=f"🔄 배치 {batch_num}: {current_skip}~{current_skip + batch_size - 1} 인덱싱 중..."
-                    ).send()
-
-                    # 배치 인덱싱 (비동기)
-                    batch_count = await loop.run_in_executor(
-                        None,
-                        lambda skip=current_skip, size=batch_size: indexer.index_repository(
-                            repo_path=arguments["repo_path"],
-                            limit=size,
-                            since=arguments.get("since"),
-                            until=arguments.get("until"),
-                            skip_existing=arguments.get("skip_existing", True),
-                            skip_offset=skip
-                        )
-                    )
-
-                    total_indexed += batch_count
-                    current_skip += batch_size
-                    remaining -= batch_size
-
-                    progress_msg.content = f"✅ 배치 {batch_num} 완료: {batch_count}개 인덱싱됨 (누적: {total_indexed}개)"
-                    await progress_msg.update()
-
-                    if batch_count == 0:
-                        logger.warning(f"Batch {batch_num} returned 0 commits, stopping")
-                        break
-
-                # 최종 결과
-                final_msg = f"✅ **분할 인덱싱 완료**\n\n"
-                final_msg += f"총 {total_indexed:,}개의 커밋이 {batch_num}개 배치로 인덱싱되었습니다.\n"
-                final_msg += f"저장소: `{arguments['repo_path']}`"
-                await cl.Message(content=final_msg).send()
-
-                return f"{total_indexed}개 커밋이 성공적으로 인덱싱되었습니다. ({batch_num}개 배치)"
-
-            else:
-                # 일반 인덱싱 (단일 배치)
-                indexed_count = await loop.run_in_executor(
-                    None,
-                    lambda: indexer.index_repository(
-                        repo_path=arguments["repo_path"],
-                        limit=index_limit,
-                        since=arguments.get("since"),
-                        until=arguments.get("until"),
-                        skip_existing=arguments.get("skip_existing", True),
-                        skip_offset=arguments.get("skip_offset", 0)
-                    )
+            # 일반 인덱싱 (분할 없이 한 번에 처리)
+            # ⚠️ MAX_COMMIT_LIMIT은 권장 사항일 뿐, 증분 인덱싱은 전체를 처리해야 함
+            indexed_count = await loop.run_in_executor(
+                None,
+                lambda: indexer.index_repository(
+                    repo_path=arguments["repo_path"],
+                    limit=index_limit,
+                    since=arguments.get("since"),
+                    until=arguments.get("until"),
+                    skip_existing=arguments.get("skip_existing", True),
+                    skip_offset=arguments.get("skip_offset", 0)
                 )
+            )
 
-                # 인덱싱 완료 메시지를 Step 외부에 명확히 표시
-                if indexed_count == 0:
-                    logger.info(f"Repository already indexed: {arguments['repo_path']}")
-                    await cl.Message(content=f"✅ **인덱싱 확인 완료**\n\n저장소가 이미 인덱싱되어 있습니다.\n저장소: `{arguments['repo_path']}`").send()
-                    return f"저장소가 이미 인덱싱되어 있습니다. 검색 및 분석을 바로 시작할 수 있습니다."
-                else:
-                    # 날짜 범위 인덱싱인 경우 실제 결과 검증
+            # 인덱싱 완료 메시지를 Step 외부에 명확히 표시
+            if indexed_count == 0:
+                logger.info(f"Repository already indexed: {arguments['repo_path']}")
+                await cl.Message(content=f"✅ **인덱싱 확인 완료**\n\n저장소가 이미 인덱싱되어 있습니다.\n저장소: `{arguments['repo_path']}`").send()
+                return f"저장소가 이미 인덱싱되어 있습니다. 검색 및 분석을 바로 시작할 수 있습니다."
+            else:
+                # 전체 인덱싱 현황 확인 (증분 인덱싱 컨텍스트 제공)
+                try:
+                    from src.indexer import normalize_repo_identifier
+                    repo_id = normalize_repo_identifier(arguments["repo_path"])
+
+                    # 현재 인덱싱된 총 개수 확인
+                    total_check_results = search_client.search(
+                        search_text="*",
+                        filter=f"repo_id eq '{repo_id}'",
+                        select=["id"],
+                        top=10000
+                    )
+                    total_indexed_count = len(list(total_check_results))
+
+                    result_msg = f"{indexed_count}개 커밋이 새로 인덱싱되었습니다. (전체: {total_indexed_count}개)"
+                except Exception as e:
+                    logger.warning(f"Failed to get total indexed count: {e}")
                     result_msg = f"{indexed_count}개 커밋이 인덱싱되었습니다."
 
-                    if arguments.get("since") or arguments.get("until"):
-                        # 날짜 범위 인덱싱의 경우 실제 인덱싱된 날짜 범위 확인
-                        try:
-                            from src.indexer import normalize_repo_identifier
-                            repo_id = normalize_repo_identifier(arguments["repo_path"])
+                if arguments.get("since") or arguments.get("until"):
+                    # 날짜 범위 인덱싱의 경우 실제 인덱싱된 날짜 범위 확인
+                    try:
+                        from src.indexer import normalize_repo_identifier
+                        repo_id = normalize_repo_identifier(arguments["repo_path"])
 
-                            # 인덱싱된 실제 날짜 범위 조회
-                            date_check_results = search_client.search(
-                                search_text="*",
-                                filter=f"repo_id eq '{repo_id}'",
-                                select=["date"],
-                                order_by=["date asc"],
-                                top=1
-                            )
-                            oldest_result = list(date_check_results)
+                        # 인덱싱된 실제 날짜 범위 조회
+                        date_check_results = search_client.search(
+                            search_text="*",
+                            filter=f"repo_id eq '{repo_id}'",
+                            select=["date"],
+                            order_by=["date asc"],
+                            top=1
+                        )
+                        oldest_result = list(date_check_results)
 
-                            date_check_results = search_client.search(
-                                search_text="*",
-                                filter=f"repo_id eq '{repo_id}'",
-                                select=["date"],
-                                order_by=["date desc"],
-                                top=1
-                            )
-                            newest_result = list(date_check_results)
+                        date_check_results = search_client.search(
+                            search_text="*",
+                            filter=f"repo_id eq '{repo_id}'",
+                            select=["date"],
+                            order_by=["date desc"],
+                            top=1
+                        )
+                        newest_result = list(date_check_results)
 
-                            if oldest_result and newest_result:
-                                oldest_date = oldest_result[0]["date"][:10]  # YYYY-MM-DD만
-                                newest_date = newest_result[0]["date"][:10]
+                        if oldest_result and newest_result:
+                            oldest_date = oldest_result[0]["date"][:10]  # YYYY-MM-DD만
+                            newest_date = newest_result[0]["date"][:10]
 
-                                requested_range = f"{arguments.get('since', '시작')} ~ {arguments.get('until', '끝')}"
-                                actual_range = f"{oldest_date} ~ {newest_date}"
+                            requested_range = f"{arguments.get('since', '시작')} ~ {arguments.get('until', '끝')}"
+                            actual_range = f"{oldest_date} ~ {newest_date}"
 
-                                result_msg += f"\n\n**날짜 범위 검증**:\n"
-                                result_msg += f"- 요청한 범위: {requested_range}\n"
-                                result_msg += f"- 실제 인덱싱된 범위: {actual_range}\n"
+                            result_msg += f"\n\n**날짜 범위 검증**:\n"
+                            result_msg += f"- 요청한 범위: {requested_range}\n"
+                            result_msg += f"- 실제 인덱싱된 범위: {actual_range}\n"
 
-                                # 요청 범위와 실제 범위가 다른 경우 안내
-                                if arguments.get("since") and arguments.get("since") != oldest_date:
-                                    result_msg += f"- ⚠️ 요청한 시작일({arguments.get('since')})에는 커밋이 없어서 {oldest_date}부터 시작됨\n"
-                                if arguments.get("until") and arguments.get("until") != newest_date:
-                                    result_msg += f"- ⚠️ 요청한 종료일({arguments.get('until')})에는 커밋이 없어서 {newest_date}까지만 포함됨\n"
+                            # 요청 범위와 실제 범위가 다른 경우 안내
+                            if arguments.get("since") and arguments.get("since") != oldest_date:
+                                result_msg += f"- ⚠️ 요청한 시작일({arguments.get('since')})에는 커밋이 없어서 {oldest_date}부터 시작됨\n"
+                            if arguments.get("until") and arguments.get("until") != newest_date:
+                                result_msg += f"- ⚠️ 요청한 종료일({arguments.get('until')})에는 커밋이 없어서 {newest_date}까지만 포함됨\n"
 
-                        except Exception as e:
-                            logger.warning(f"Failed to verify date range: {e}")
+                    except Exception as e:
+                        logger.warning(f"Failed to verify date range: {e}")
 
-                    await cl.Message(content=f"✅ **인덱싱 완료**\n\n{result_msg}\n\n저장소: `{arguments['repo_path']}`").send()
-                    return result_msg
+                await cl.Message(content=f"✅ **인덱싱 완료**\n\n{result_msg}\n\n저장소: `{arguments['repo_path']}`").send()
+                return result_msg
 
         elif tool_name == "get_index_statistics":
             index_manager = IndexManager(
@@ -1462,7 +1583,8 @@ async def on_message(message: cl.Message):
             conversation_history = [system_msg] + recent_messages
             logger.info(f"Conversation history trimmed to {len(conversation_history)} messages")
 
-        msg = cl.Message(content="")
+        # 분석 중 메시지를 먼저 표시 (Step들이 이 아래에서 실행됨)
+        msg = cl.Message(content="⏳ 요청을 분석하고 있습니다...")
         await msg.send()
 
         max_iterations = 10
@@ -1472,35 +1594,61 @@ async def on_message(message: cl.Message):
         while iteration < max_iterations:
             iteration += 1
 
-            async with cl.Step(name=f"💭 분석 중... (단계 {iteration})", type="llm", show_input=False) as step:
+            # 🔧 전체 단계를 감싸는 부모 Step
+            async with cl.Step(name=f"🔧 작업 수행 (단계 {iteration})", type="run", show_input=False) as parent_step:
                 try:
-                    response = openai_client.chat.completions.create(
-                        model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
-                        messages=conversation_history,
-                        tools=AVAILABLE_TOOLS,
-                        tool_choice="auto",
-                        temperature=0.7,
-                        max_tokens=1000
-                    )
+                    # 💭 분석 단계 (자식 Step)
+                    async with cl.Step(name="💭 분석 중...", parent_id=parent_step.id, type="llm", show_input=False) as analysis_step:
+                        response = openai_client.chat.completions.create(
+                            model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
+                            messages=conversation_history,
+                            tools=AVAILABLE_TOOLS,
+                            tool_choice="auto",
+                            temperature=0.7,
+                            max_tokens=1000,
+                            stream=False  # 도구 선택을 위해 non-streaming
+                        )
 
-                    assistant_message = response.choices[0].message
+                        assistant_message = response.choices[0].message
 
-                    # LLM의 생각 표시 (간결하게)
-                    if assistant_message.tool_calls:
-                        tool_names = [tc.function.name for tc in assistant_message.tool_calls]
-                        step.output = f"🔧 도구 실행: {', '.join(tool_names)}"
-                    elif assistant_message.content:
-                        step.output = "✅ 응답 생성 완료"
+                        # LLM의 생각 표시 (간결하게)
+                        if assistant_message.tool_calls:
+                            tool_names = [tc.function.name for tc in assistant_message.tool_calls]
+                            analysis_step.output = f"🔧 도구 선택: {', '.join(tool_names)}"
+                        elif assistant_message.content:
+                            analysis_step.output = "✅ 응답 준비 완료"
 
-                    # 도구 호출 없이 최종 응답만 있는 경우
+                    # 도구 호출 없이 최종 응답만 있는 경우 - 스트리밍으로 다시 생성
                     if not assistant_message.tool_calls:
-                        conversation_history.append({
-                            "role": "assistant",
-                            "content": assistant_message.content
-                        })
-                        # 메인 메시지에 최종 응답 표시
-                        msg.content = assistant_message.content or "응답이 생성되었습니다."
+                        # 스트리밍으로 응답 생성
+                        msg.content = ""
+
+                        streaming_response = openai_client.chat.completions.create(
+                            model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
+                            messages=conversation_history,
+                            temperature=0.7,
+                            max_tokens=1000,
+                            stream=True
+                        )
+
+                        final_content = ""
+                        for chunk in streaming_response:
+                            # 안전하게 choices와 delta 체크
+                            if chunk.choices and len(chunk.choices) > 0:
+                                delta = chunk.choices[0].delta
+                                if delta and hasattr(delta, 'content') and delta.content:
+                                    token = delta.content
+                                    final_content += token
+                                    await msg.stream_token(token)
+
                         await msg.update()
+
+                        if final_content:
+                            conversation_history.append({
+                                "role": "assistant",
+                                "content": final_content
+                            })
+                        parent_step.output = "✅ 응답 완료"
                         break
 
                     conversation_history.append({
@@ -1523,20 +1671,20 @@ async def on_message(message: cl.Message):
                         tool_name = tool_call.function.name
                         tool_args = json.loads(tool_call.function.arguments)
 
-                        # Step 밖에서 도구 실행 (AskActionMessage가 숨지 않도록)
-                        tool_result = await execute_tool(
-                            tool_name=tool_name,
-                            arguments=tool_args,
-                            openai_client=openai_client,
-                            search_client=search_client,
-                            index_client=index_client
-                        )
+                        # 🛠️ 도구 실행 단계 (자식 Step)
+                        async with cl.Step(name=f"🛠️ {tool_name}", parent_id=parent_step.id, type="tool", show_input=False) as tool_step:
+                            # Step 밖에서 도구 실행 (AskActionMessage가 숨지 않도록)
+                            tool_result = await execute_tool(
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                                openai_client=openai_client,
+                                search_client=search_client,
+                                index_client=index_client
+                            )
 
-                        # 도구 실행 완료 플래그 설정
-                        has_tool_result = True
+                            # 도구 실행 완료 플래그 설정
+                            has_tool_result = True
 
-                        # 결과를 Step으로 표시 (간결하게)
-                        async with cl.Step(name=f"✅ {tool_name} 완료", parent_id=step.id, type="tool", show_input=False) as tool_step:
                             # 결과 크기 제한 (SocketIO 페이로드 제한 회피)
                             display_result = tool_result[:MAX_TOOL_RESULT_DISPLAY] if len(tool_result) > MAX_TOOL_RESULT_DISPLAY else tool_result
 
@@ -1558,32 +1706,150 @@ async def on_message(message: cl.Message):
                                 "content": truncated_result
                             })
 
+                    parent_step.output = "✅ 도구 실행 완료"
+
+                    # 🔄 도구 실행 후 다음 행동 결정 (tool_calls 확인을 위해 non-streaming)
+                    logger.info("Checking next action after tool execution...")
+                    next_response = openai_client.chat.completions.create(
+                        model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
+                        messages=conversation_history,
+                        tools=AVAILABLE_TOOLS,
+                        tool_choice="auto",
+                        temperature=0.7,
+                        max_tokens=1000,
+                        stream=False
+                    )
+
+                    next_message = next_response.choices[0].message
+
+                    # 추가 도구 호출이 있으면 현재 iteration에서 계속 실행
+                    if next_message.tool_calls:
+                        logger.info(f"More tool calls needed: {[tc.function.name for tc in next_message.tool_calls]}")
+
+                        # assistant 메시지 추가
+                        conversation_history.append({
+                            "role": "assistant",
+                            "content": next_message.content,
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments
+                                    }
+                                }
+                                for tc in next_message.tool_calls
+                            ]
+                        })
+
+                        # 추가 도구들을 현재 iteration에서 실행
+                        for tool_call in next_message.tool_calls:
+                            tool_name = tool_call.function.name
+                            tool_args = json.loads(tool_call.function.arguments)
+
+                            async with cl.Step(name=f"🛠️ {tool_name} (추가)", parent_id=parent_step.id, type="tool", show_input=False) as extra_tool_step:
+                                extra_tool_result = await execute_tool(
+                                    tool_name=tool_name,
+                                    arguments=tool_args,
+                                    openai_client=openai_client,
+                                    search_client=search_client,
+                                    index_client=index_client
+                                )
+
+                                truncated_extra_result = extra_tool_result[:MAX_TOOL_RESULT_TO_LLM]
+                                if len(extra_tool_result) > MAX_TOOL_RESULT_TO_LLM:
+                                    truncated_extra_result += f"\n\n...(총 {len(extra_tool_result)}자 중 {MAX_TOOL_RESULT_TO_LLM}자 표시)"
+
+                                conversation_history.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": truncated_extra_result
+                                })
+
+                                extra_tool_step.output = "✅ 완료"
+
+                        parent_step.output = "🔄 추가 도구 실행 필요"
+                        # 다음 iteration으로 계속
+                        continue
+
+                    # 텍스트 응답만 있으면 스트리밍으로 표시
+                    if next_message.content:
+                        logger.info("Final response after tool execution, streaming to user...")
+                        async with cl.Step(name="💬 응답 생성", parent_id=parent_step.id, type="llm", show_input=False) as response_step:
+                            msg.content = ""
+
+                            # 스트리밍으로 다시 생성
+                            streaming_response = openai_client.chat.completions.create(
+                                model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
+                                messages=conversation_history,
+                                temperature=0.7,
+                                max_tokens=1000,
+                                stream=True
+                            )
+
+                            response_content = ""
+                            for chunk in streaming_response:
+                                if chunk.choices and len(chunk.choices) > 0:
+                                    delta = chunk.choices[0].delta
+                                    if delta and hasattr(delta, 'content') and delta.content:
+                                        token = delta.content
+                                        response_content += token
+                                        await msg.stream_token(token)
+
+                            await msg.update()
+
+                            if response_content:
+                                conversation_history.append({
+                                    "role": "assistant",
+                                    "content": response_content
+                                })
+                            response_step.output = "✅ 응답 완료"
+                            has_tool_result = True
+                            break  # 최종 응답 후 종료
+
                 except Exception as e:
                     logger.error(f"Error in iteration {iteration}: {e}")
-                    step.output = f"❌ 오류 발생: {str(e)}"
+                    parent_step.output = f"❌ 오류 발생: {str(e)}"
                     break
 
-        # 도구 실행 후 최종 응답이 없으면 강제로 응답 생성
+        # 도구 실행 후 최종 응답이 없으면 fallback (일반적으로 위에서 처리되므로 거의 실행 안됨)
         if has_tool_result and iteration < max_iterations and not msg.content:
             try:
-                logger.info("Forcing final response after tool execution")
-                async with cl.Step(name="💬 최종 응답 생성", type="llm", show_input=False) as final_step:
+                logger.warning("Fallback: Forcing final response after tool execution")
+                # ✅ 최종 응답은 최상위 레벨로 (parent 없음)
+                async with cl.Step(name="✅ 최종 응답 (Fallback)", type="llm", show_input=False) as final_step:
+                    # 스트리밍 방식으로 응답 생성 (깜빡이는 커서 표시)
+                    msg.content = ""  # 메시지 초기화
+
                     final_response = openai_client.chat.completions.create(
                         model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
                         messages=conversation_history,
                         temperature=0.7,
-                        max_tokens=1000
+                        max_tokens=1000,
+                        stream=True  # 스트리밍 활성화
                     )
-                    final_content = final_response.choices[0].message.content
-                    conversation_history.append({
-                        "role": "assistant",
-                        "content": final_content
-                    })
-                    msg.content = final_content or "작업이 완료되었습니다."
+
+                    final_content = ""
+                    for chunk in final_response:
+                        # 안전하게 choices와 delta 체크
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if delta and hasattr(delta, 'content') and delta.content:
+                                token = delta.content
+                                final_content += token
+                                await msg.stream_token(token)
+
                     await msg.update()
+
+                    if final_content:
+                        conversation_history.append({
+                            "role": "assistant",
+                            "content": final_content
+                        })
                     final_step.output = "✅ 응답 완료"
             except Exception as e:
-                logger.error(f"Error generating final response: {e}")
+                logger.error(f"Error generating final response: {e}", exc_info=True)
                 msg.content = "작업이 완료되었습니다."
                 await msg.update()
 

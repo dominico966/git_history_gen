@@ -100,9 +100,28 @@ def get_commit_count(
                 period_text = f" ({until} 이전)"
 
             logger.info(f"✓ Cached repo: {count:,} commits{period_text}")
+
+            # 0개 커밋인 경우 명확한 메시지 생성
+            if count == 0:
+                if since or until:
+                    message = f"⚠️ 지정한 기간{period_text}에는 커밋이 없습니다. 날짜 범위를 조정해보세요."
+                else:
+                    message = "⚠️ 이 저장소에는 커밋이 없습니다."
+
+                return {
+                    "repo_path": repo_path,
+                    "commit_count": 0,
+                    "has_commits": False,
+                    "since": since,
+                    "until": until,
+                    "method": "cached_clone",
+                    "message": message
+                }
+
             return {
                 "repo_path": repo_path,
                 "commit_count": count,
+                "has_commits": True,
                 "since": since,
                 "until": until,
                 "method": "cached_clone",
@@ -130,9 +149,27 @@ def get_commit_count(
             elif until:
                 period_text = f" ({until} 이전)"
 
+            # 0개 커밋인 경우 명확한 메시지 생성
+            if commit_count == 0:
+                if since or until:
+                    message = f"⚠️ 지정한 기간{period_text}에는 커밋이 없습니다. 날짜 범위를 조정해보세요."
+                else:
+                    message = "⚠️ 이 저장소에는 커밋이 없습니다."
+
+                return {
+                    "repo_path": repo_path,
+                    "commit_count": 0,
+                    "has_commits": False,
+                    "since": since,
+                    "until": until,
+                    "method": "local",
+                    "message": message
+                }
+
             return {
                 "repo_path": repo_path,
                 "commit_count": commit_count,
+                "has_commits": True,
                 "since": since,
                 "until": until,
                 "method": "local",
@@ -146,6 +183,7 @@ def get_commit_count(
         return {
             "repo_path": repo_path,
             "commit_count": 0,
+            "has_commits": False,
             "error": str(e),
             "message": f"커밋 개수 확인 실패: {str(e)}"
         }
@@ -257,9 +295,16 @@ def search_commits(
         List[Dict]: 검색 결과 리스트
     """
     try:
-        logger.info(f"Searching commits with query: {query}")
+        # 🔍 검색 조건 요약 로그
+        logger.info("=" * 80)
+        logger.info("🔍 SEARCH REQUEST SUMMARY")
+        logger.info(f"  📝 Query: '{query}'")
+        logger.info(f"  📊 Top Results: {top}")
+        logger.info(f"  📁 Repository Filter: {repo_path if repo_path else 'ALL repositories'}")
         if repo_path:
-            logger.info(f"Filtering by repository: {repo_path}")
+            repo_id = normalize_repo_identifier(repo_path)
+            logger.info(f"  🔑 Repo ID: {repo_id}")
+        logger.info("=" * 80)
 
         # 쿼리 임베딩
         query_embeddings = embed_texts([query], openai_client)
@@ -280,8 +325,10 @@ def search_commits(
         if repo_path:
             repo_id = normalize_repo_identifier(repo_path)
             filter_expr = f"repo_id eq '{repo_id}'"
+            logger.info(f"📌 Applying filter: {filter_expr}")
 
         # 하이브리드 검색 (텍스트 + 벡터)
+        logger.info(f"🔎 Executing hybrid search (text + vector)...")
         results = search_client.search(
             search_text=query,
             vector_queries=[vector_query],
@@ -318,7 +365,12 @@ def search_commits(
                 "relation": result.get("relationship_type", "sequential")
             })
 
-        logger.info(f"✓ Found {len(search_results)} results")
+        logger.info("=" * 80)
+        logger.info(f"✅ SEARCH COMPLETED: Found {len(search_results)} results")
+        if search_results:
+            logger.info(f"  📌 Top result: [{search_results[0]['commit_id'][:8]}] {search_results[0]['message'][:60]}...")
+            logger.info(f"  🎯 Score range: {search_results[0]['score']:.4f} ~ {search_results[-1]['score']:.4f}")
+        logger.info("=" * 80)
         return search_results
 
     except Exception as e:
@@ -329,7 +381,9 @@ def search_commits(
 def analyze_contributors(
     repo_path: str,
     criteria: Optional[str] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None
 ) -> Dict:
     """
     기여자별 활동을 분석합니다.
@@ -338,16 +392,22 @@ def analyze_contributors(
         repo_path: Git 저장소 경로
         criteria: 평가 기준 (None이면 기본값 사용)
         limit: 분석할 커밋 수
+        since: 시작 날짜 (ISO 8601 형식, 예: '2024-01-01')
+        until: 종료 날짜 (ISO 8601 형식, 예: '2024-12-31')
 
     Returns:
         Dict: 기여자별 통계
     """
     try:
-        logger.info(f"Analyzing contributors for {repo_path}")
+        logger.info(f"Analyzing contributors for {repo_path} (since: {since}, until: {until})")
 
         generator = DocumentGenerator(repo_path)
         try:
-            commits = generator.get_commits(limit=limit if limit else 1000)
+            commits = generator.get_commits(
+                limit=limit if limit else 1000,
+                since=since,
+                until=until
+            )
         finally:
             generator.close()  # 파일 핸들 해제
 
