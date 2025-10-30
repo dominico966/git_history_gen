@@ -1380,22 +1380,22 @@ async def set_starters():
         cl.Starter(
             label="저장소 인덱싱 시작",
             message="현재 저장소의 커밋 히스토리를 인덱싱해주세요. 저장소 규모를 먼저 확인하고 적절한 개수를 제안해주세요.",
-            icon="https://img.icons8.com/?id=1476&format=png&size=64",
+            icon="/public/icons/icon_db_1476_64.png",
         ),
         cl.Starter(
             label="최근 커밋 요약",
             message="최근 10개의 커밋을 요약해주세요. 주요 변경사항과 패턴을 분석해주세요.",
-            icon="https://img.icons8.com/?id=33279&format=png&size=64",
+            icon="/public/icons/icon_commit_33279_64.png",
         ),
         cl.Starter(
             label="기여자 활동 분석",
             message="저장소의 기여자별 활동을 분석해주세요. 누가 가장 많이 기여했는지, 주요 담당 영역은 무엇인지 알려주세요.",
-            icon="https://img.icons8.com/?id=102261&format=png&size=64",
+            icon="/public/icons/icon_users_102261_64.png",
         ),
         cl.Starter(
             label="버그 수정 커밋 찾기",
             message="버그 수정과 관련된 커밋들을 찾아서 분석해주세요. 어떤 버그들이 주로 수정되었는지 요약해주세요.",
-            icon="https://img.icons8.com/?id=417&format=png&size=64",
+            icon="/public/icons/icon_bug_417_64.png",
         ),
     ]
 
