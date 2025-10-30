@@ -16,7 +16,7 @@ Git 저장소의 커밋 히스토리를 분석하고 검색하는 AI 기반 도�
 ## 🔧 기술 스택
 
 - **Python 3.13+**
-- **Azure OpenAI**: GPT-4o-mini, text-embedding-3-small
+- **Azure OpenAI**: GPT-4.1-mini, text-embedding-3-small
 - **Azure AI Search**: 벡터 검색
 - **GitPython**: Git 저장소 분석
 - **Streamlit**: 웹 UI
@@ -144,10 +144,12 @@ docs/
 
 ## 📝 개발 가이드
 
-자세한 개발 가이드는 다음 문서를 참조하세요:
-- [프로젝트 구현 문서](docs/PROJECT_IMPLEMENTATION.md)
-- [프로젝트 평가 보고서](docs/PROJECT_EVALUATION.md)
-- [프로젝트 가이드](project_guide.md)
+[//]: # ()
+[//]: # (자세한 개발 가이드는 다음 문서를 참조하세요:)
+
+[//]: # (- [프로젝트 구현 문서]&#40;docs/PROJECT_IMPLEMENTATION.md&#41;)
+
+- [프로젝트 가이드](../project_guide.md)
 
 ## 🤝 기여
 

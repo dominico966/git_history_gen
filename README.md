@@ -160,7 +160,6 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 - [🗄️ Azure AI Search Index 활용 가이드](docs/AZURE_SEARCH_INDEX_GUIDE.md) 🆕
 
 ### 프로젝트 정보
-- [📋 문서 인덱스](docs/00_INDEX.md)
 - [🗂️ 발표 체크리스트](docs/PRESENTATION_CHECKLIST.md)
 - [🎬 데모 스크립트](docs/DEMO_SCRIPT.md)
 - [❓ Q&A 예상 질문](docs/QNA.md)
