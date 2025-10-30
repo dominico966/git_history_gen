@@ -156,7 +156,6 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 
 ### 시작하기
 - [⚡ 빠른 실행 가이드](CHAINLIT_QUICKSTART.md)
-- [📖 사용자 가이드](docs/USER_GUIDE.md)
 - [🗄️ Azure AI Search Index 활용 가이드](docs/AZURE_SEARCH_INDEX_GUIDE.md) 🆕
 
 ### 프로젝트 정보
