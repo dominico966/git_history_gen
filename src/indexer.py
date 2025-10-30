@@ -5,7 +5,7 @@ Azure AI Search 인덱싱 모듈
 
 import logging
 import hashlib
-from typing import Optional
+from typing import Optional, List, Set
 from urllib.parse import urlparse
 from pathlib import Path
 from azure.search.documents import SearchClient
@@ -156,6 +156,35 @@ class CommitIndexer:
             logger.error(f"Failed to create index: {e}")
             raise
 
+    def _get_existing_ids_for_candidates(self, repo_id: str, candidate_ids: List[str], chunk_size: int = 800) -> Set[str]:
+        """
+        주어진 후보 커밋 id 집합에 대해, 인덱스에 이미 존재하는 id만 배치로 조회하여 반환합니다.
+        search.in 함수를 사용해 OData 필터로 한 번에 여러 id를 확인합니다.
+        """
+        existing: Set[str] = set()
+        if not candidate_ids:
+            return existing
+        try:
+            # 안전하게 청크로 나누어 처리 (필드 길이/쿼리 길이 제한 대비)
+            for i in range(0, len(candidate_ids), chunk_size):
+                chunk = candidate_ids[i:i + chunk_size]
+                ids_joined = ",".join(chunk)
+                filter_expr = f"repo_id eq '{repo_id}' and search.in(id, '{ids_joined}', ',')"
+                results = self.search_client.search(
+                    search_text="*",
+                    filter=filter_expr,
+                    select=["id"],
+                    top=len(chunk)
+                )
+                for r in results:
+                    try:
+                        existing.add(r["id"])  # 최소 필드만 접근
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"Failed to batch-check existing ids: {e}")
+        return existing
+
     def index_repository(
         self,
         repo_path: str,
@@ -196,21 +225,9 @@ class CommitIndexer:
             logger.info(f"  ⏭️  Skip Offset: {skip_offset}")
             logger.info("=" * 80)
 
-            # 이미 인덱싱된 커밋 ID 가져오기 (증분 인덱싱)
-            # 같은 저장소의 커밋만 확인
-            existing_commit_ids = set()
-            if skip_existing:
-                try:
-                    results = self.search_client.search(
-                        search_text="*",
-                        filter=f"repo_id eq '{repo_id}'",  # 같은 저장소의 커밋만 필터링
-                        select=["id"],
-                        top=100  # 최대 10000개까지 확인
-                    )
-                    existing_commit_ids = {result["id"] for result in results}
-                    logger.info(f"Found {len(existing_commit_ids)} existing commits for this repository in index")
-                except Exception as e:
-                    logger.warning(f"Failed to get existing commits: {e}")
+            # 이미 인덱싱된 커밋 ID 확인 전략:
+            # 1) 전체 스캔 대신, 후보 커밋 목록을 먼저 수집한 뒤 해당 id들만 배치 조회(search.in)로 존재 여부 확인
+            # 2) 그 결과를 기반으로 새 커밋만 필터링 (정확/저비용)
 
             # skip_offset이 크면 미리 충분한 depth로 fetch (원격 저장소만)
             if skip_offset > 0 and repo_path.startswith(('http://', 'https://', 'git@', 'ssh://')):
@@ -236,8 +253,10 @@ class CommitIndexer:
                     logger.warning("No commits found")
                 return 0
 
-            # 이미 인덱싱된 커밋 필터링
+            # 증분 스킵: 후보 집합에 대해서만 존재 여부 확인
             if skip_existing:
+                candidate_ids = [c['id'] for c in commits]
+                existing_commit_ids = self._get_existing_ids_for_candidates(repo_id, candidate_ids)
                 original_count = len(commits)
                 commits = [c for c in commits if c['id'] not in existing_commit_ids]
                 skipped = original_count - len(commits)
@@ -264,7 +283,6 @@ class CommitIndexer:
                     except:
                         pass
 
-                # ...existing code...
                 # 임베딩할 텍스트 생성 (향상된 문맥 포함)
                 files_info = [f"{f['file']} ({f['change_type']})" for f in commit['files']]
 
@@ -384,4 +402,3 @@ Functions: {'; '.join(func_changes) if func_changes else 'No function changes'}"
         except Exception as e:
             logger.error(f"Failed to delete index: {e}")
             raise
-

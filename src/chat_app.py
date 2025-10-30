@@ -98,6 +98,16 @@ SYSTEM_PROMPT_PARTS = [
     "- 부분 인덱싱 → 추가 작업, 완전 인덱싱 → \"이미 있음\" 가능",
     "- 날짜범위 후 실제 결과 검증",
     "",
+    "# ⚠️ commit_sha 사용 규칙",
+    "- **search_commits 결과의 commit_id는 실제 커밋 SHA 해시입니다**",
+    "- get_commit_diff, read_file_from_commit 등을 호출할 때:",
+    "  ✅ DO: commit_id 값을 그대로 사용 (예: 'a1b2c3d4e5f6')",
+    "  ❌ DON'T: 커밋 메시지를 사용 (예: 'feat: 새 기능')",
+    "- 예시:",
+    "  search_commits → commit_id: 'abc123def456'",
+    "  get_commit_diff(commit_sha='abc123def456') ✅",
+    "  get_commit_diff(commit_sha='feat: 새 기능') ❌",
+    "",
     "# 도구",
     "- search_commits: 자동 UI 확인",
     "- index_repository: 대용량시 자동 UI 확인",
@@ -294,7 +304,7 @@ AVAILABLE_TOOLS = [
                     },
                     "commit_sha": {
                         "type": "string",
-                        "description": "커밋 해시"
+                        "description": "실제 커밋 SHA 해시 (예: 'a1b2c3d4'). search_commits의 commit_id를 사용하세요."
                     },
                     "file_path": {
                         "type": "string",
@@ -319,7 +329,7 @@ AVAILABLE_TOOLS = [
                     },
                     "commit_sha": {
                         "type": "string",
-                        "description": "커밋 해시"
+                        "description": "실제 커밋 SHA 해시 (예: 'a1b2c3d4'). search_commits의 commit_id를 사용하세요."
                     },
                     "file_path": {
                         "type": "string",
@@ -334,7 +344,7 @@ AVAILABLE_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_commit_diff",
-            "description": "특정 커밋의 전체 변경사항(diff)을 가져옵니다. 어떤 파일이 어떻게 변경되었는지 한눈에 볼 수 있습니다.",
+            "description": "특정 커밋의 전체 변경사항(diff)을 가져옵니다. 어떤 파일이 어떻게 변경되었는지 한눈에 볼 수 있습니다. **중요**: commit_sha는 반드시 실제 커밋 해시(예: 'a1b2c3d4e5f6')를 사용해야 하며, 커밋 메시지를 사용하면 안 됩니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -344,7 +354,7 @@ AVAILABLE_TOOLS = [
                     },
                     "commit_sha": {
                         "type": "string",
-                        "description": "커밋 해시 또는 커밋 ID"
+                        "description": "실제 커밋 SHA 해시 (예: 'a1b2c3d4e5f6' 또는 짧은 형식 'a1b2c3d4'). **절대로 커밋 메시지를 사용하지 마세요!** search_commits의 결과에서 commit_id 값을 사용하세요."
                     },
                     "max_files": {
                         "type": "integer",
@@ -798,13 +808,18 @@ async def execute_tool(
 
             # 결과 요약 (페이로드 크기 제한)
             if isinstance(results, list) and len(results) > 0:
-                summary = f"검색 결과: {len(results)}개 커밋 발견\n\n"
+                summary = f"🔍 검색 결과: {len(results)}개 커밋 발견\n\n"
+                summary += "**중요**: 아래의 commit_id는 실제 커밋 SHA 해시입니다. get_commit_diff를 호출할 때 이 값을 그대로 사용하세요.\n\n"
                 for i, r in enumerate(results[:10], 1):  # 최대 10개만
                     commit_id = r.get('commit_id', 'N/A')
                     short_sha = commit_id[:8] if len(commit_id) >= 8 else commit_id
-                    summary += f"{i}. [{short_sha}] {r.get('message', 'N/A')[:80]}... (by {r.get('author', 'N/A')})\n"
+                    summary += f"{i}. **commit_id**: `{commit_id}` (짧은 형식: {short_sha})\n"
+                    summary += f"   **message**: {r.get('message', 'N/A')[:80]}...\n"
+                    summary += f"   **author**: {r.get('author', 'N/A')}\n"
+                    summary += f"   **date**: {r.get('date', 'N/A')}\n\n"
                 if len(results) > 10:
-                    summary += f"\n...외 {len(results)-10}개 커밋"
+                    summary += f"...외 {len(results)-10}개 커밋\n\n"
+                summary += "⚠️ **주의**: get_commit_diff를 호출할 때는 반드시 위의 commit_id 값을 commit_sha 파라미터로 사용하세요!"
                 return summary
             return json.dumps(results, ensure_ascii=False, indent=2)
 
@@ -1251,14 +1266,14 @@ async def execute_tool(
                     from src.indexer import normalize_repo_identifier
                     repo_id = normalize_repo_identifier(arguments["repo_path"])
 
-                    # 현재 인덱싱된 총 개수 확인
+                    # 현재 인덱싱된 총 개수 확인 (include_total_count 사용)
                     total_check_results = search_client.search(
                         search_text="*",
                         filter=f"repo_id eq '{repo_id}'",
-                        select=["id"],
-                        top=10000
+                        include_total_count=True,
+                        top=0  # 결과는 필요없고 개수만 필요
                     )
-                    total_indexed_count = len(list(total_check_results))
+                    total_indexed_count = total_check_results.get_count()
 
                     result_msg = f"{indexed_count}개 커밋이 새로 인덱싱되었습니다. (전체: {total_indexed_count}개)"
                 except Exception as e:
@@ -1653,7 +1668,7 @@ async def on_message(message: cl.Message):
 
                     conversation_history.append({
                         "role": "assistant",
-                        "content": assistant_message.content,
+                        "content": assistant_message.content or "",
                         "tool_calls": [
                             {
                                 "id": tc.id,
@@ -1673,7 +1688,6 @@ async def on_message(message: cl.Message):
 
                         # 🛠️ 도구 실행 단계 (자식 Step)
                         async with cl.Step(name=f"🛠️ {tool_name}", parent_id=parent_step.id, type="tool", show_input=False) as tool_step:
-                            # Step 밖에서 도구 실행 (AskActionMessage가 숨지 않도록)
                             tool_result = await execute_tool(
                                 tool_name=tool_name,
                                 arguments=tool_args,
@@ -1685,16 +1699,13 @@ async def on_message(message: cl.Message):
                             # 도구 실행 완료 플래그 설정
                             has_tool_result = True
 
-                            # 결과 크기 제한 (SocketIO 페이로드 제한 회피)
-                            display_result = tool_result[:MAX_TOOL_RESULT_DISPLAY] if len(tool_result) > MAX_TOOL_RESULT_DISPLAY else tool_result
-
                             # Step 출력은 간결하게
                             if len(tool_result) > MAX_TOOL_RESULT_DISPLAY:
-                                tool_step.output = f"✅ 완료 (결과 {len(tool_result):,}자, 일부 생략)"
+                                tool_step.output = f"✅ 완료 (결과 {len(tool_result):,}자)"
                             else:
                                 tool_step.output = f"✅ 완료"
 
-                            # LLM에게 전달할 결과는 더 길게 허용하되 제한
+                            # LLM에게 전달할 결과는 제한
                             truncated_result = tool_result[:MAX_TOOL_RESULT_TO_LLM]
                             if len(tool_result) > MAX_TOOL_RESULT_TO_LLM:
                                 truncated_result += f"\n\n...(총 {len(tool_result)}자 중 {MAX_TOOL_RESULT_TO_LLM}자 표시)"
@@ -1729,7 +1740,7 @@ async def on_message(message: cl.Message):
                         # assistant 메시지 추가
                         conversation_history.append({
                             "role": "assistant",
-                            "content": next_message.content,
+                            "content": next_message.content or "",
                             "tool_calls": [
                                 {
                                     "id": tc.id,
@@ -1773,86 +1784,27 @@ async def on_message(message: cl.Message):
                         # 다음 iteration으로 계속
                         continue
 
-                    # 텍스트 응답만 있으면 스트리밍으로 표시
+                    # 텍스트 응답이 있으면 conversation_history에 추가하고 루프 종료
                     if next_message.content:
-                        logger.info("Final response after tool execution, streaming to user...")
-                        async with cl.Step(name="💬 응답 생성", parent_id=parent_step.id, type="llm", show_input=False) as response_step:
-                            msg.content = ""
+                        logger.info("Final response ready, adding to history")
+                        conversation_history.append({
+                            "role": "assistant",
+                            "content": next_message.content
+                        })
+                        parent_step.output = "✅ 완료"
+                        has_tool_result = False  # 이미 응답이 있으므로 밖에서 생성하지 않음
 
-                            # 스트리밍으로 다시 생성
-                            streaming_response = openai_client.chat.completions.create(
-                                model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
-                                messages=conversation_history,
-                                temperature=0.7,
-                                max_tokens=1000,
-                                stream=True
-                            )
-
-                            response_content = ""
-                            for chunk in streaming_response:
-                                if chunk.choices and len(chunk.choices) > 0:
-                                    delta = chunk.choices[0].delta
-                                    if delta and hasattr(delta, 'content') and delta.content:
-                                        token = delta.content
-                                        response_content += token
-                                        await msg.stream_token(token)
-
-                            await msg.update()
-
-                            if response_content:
-                                conversation_history.append({
-                                    "role": "assistant",
-                                    "content": response_content
-                                })
-                            response_step.output = "✅ 응답 완료"
-                            has_tool_result = True
-                            break  # 최종 응답 후 종료
+                        # msg에 내용 표시
+                        msg.content = next_message.content
+                        await msg.update()
+                        break  # 루프 종료
 
                 except Exception as e:
                     logger.error(f"Error in iteration {iteration}: {e}")
                     parent_step.output = f"❌ 오류 발생: {str(e)}"
                     break
 
-        # 도구 실행 후 최종 응답이 없으면 fallback (일반적으로 위에서 처리되므로 거의 실행 안됨)
-        if has_tool_result and iteration < max_iterations and not msg.content:
-            try:
-                logger.warning("Fallback: Forcing final response after tool execution")
-                # ✅ 최종 응답은 최상위 레벨로 (parent 없음)
-                async with cl.Step(name="✅ 최종 응답 (Fallback)", type="llm", show_input=False) as final_step:
-                    # 스트리밍 방식으로 응답 생성 (깜빡이는 커서 표시)
-                    msg.content = ""  # 메시지 초기화
-
-                    final_response = openai_client.chat.completions.create(
-                        model=os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini"),
-                        messages=conversation_history,
-                        temperature=0.7,
-                        max_tokens=1000,
-                        stream=True  # 스트리밍 활성화
-                    )
-
-                    final_content = ""
-                    for chunk in final_response:
-                        # 안전하게 choices와 delta 체크
-                        if chunk.choices and len(chunk.choices) > 0:
-                            delta = chunk.choices[0].delta
-                            if delta and hasattr(delta, 'content') and delta.content:
-                                token = delta.content
-                                final_content += token
-                                await msg.stream_token(token)
-
-                    await msg.update()
-
-                    if final_content:
-                        conversation_history.append({
-                            "role": "assistant",
-                            "content": final_content
-                        })
-                    final_step.output = "✅ 응답 완료"
-            except Exception as e:
-                logger.error(f"Error generating final response: {e}", exc_info=True)
-                msg.content = "작업이 완료되었습니다."
-                await msg.update()
-
+        # 최대 반복 횟수 도달 시에만 경고 메시지
         if iteration >= max_iterations and not msg.content:
             msg.content = "⚠️ 최대 반복 횟수에 도달했습니다. 요청을 다시 시도해주세요."
             await msg.update()
