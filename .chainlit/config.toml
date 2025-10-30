@@ -130,11 +130,11 @@ alert_style = "classic"
 # Specify a custom meta image url.
 # custom_meta_image_url = "https://chainlit-cloud.s3.eu-west-3.amazonaws.com/logo/chainlit_banner.png"
 
-# Load assistant logo directly from local file.
-logo_file = "/public/icons/logo_git_20906_100.png"
+# Load assistant logo directly from URL.
+logo_file_url = "/public/icons/logo_git_20906_100.png"
 
-# Load assistant avatar image from local file.
-default_avatar = "/public/icons/avatar_agent_icons8_nolan_80.png"
+# Load assistant avatar image directly from URL.
+default_avatar_file_url = "/public/icons/avatar_agent_icons8_nolan_80.png"
 
 # Specify a custom build directory for the frontend.
 # This can be used to customize the frontend code.
