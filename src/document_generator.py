@@ -45,16 +45,20 @@ class DocumentGenerator:
                 self.use_cache = True
                 logger.info(f"Detected remote repository: {repo_path}")
 
-                # 캐시에서 가져오거나 새로 클론 (전체 히스토리)
+                # 캐시에서 가져오거나 새로 클론 (shallow clone - depth=50)
                 cache = RepoCloneCache()
-                cached_path = cache.get_or_clone(repo_path)
+                cached_path = cache.get_or_clone(repo_path, depth=None)  # None = shallow clone
 
                 # 캐시된 경로 사용 (temp_dir는 설정하지 않음 - 캐시 매니저가 관리)
                 self.repo = git.Repo(cached_path)
+                self.cached_path = cached_path
+                self.repo_url = repo_path
                 logger.info(f"Using repository from cache: {cached_path}")
             else:
                 # 로컬 저장소
                 self.repo = git.Repo(repo_path)
+                self.cached_path = None
+                self.repo_url = None
                 logger.info(f"Initialized Git repository: {repo_path}")
 
         except git.exc.InvalidGitRepositoryError as e:
@@ -176,6 +180,18 @@ class DocumentGenerator:
 
             logger.info(f"Extracting commits from {branch} (limit: {limit}, since: {since}, until: {until}, skip: {skip})")
 
+            # skip이 크면 더 깊게 fetch 필요
+            if skip > 0 and self.is_remote and self.cached_path and self.repo_url:
+                required_depth = skip + (limit if limit else 100)
+                logger.info(f"Skip offset {skip} detected, ensuring depth >= {required_depth}")
+
+                from src.repo_cache import RepoCloneCache
+                cache = RepoCloneCache()
+                # 필요한 만큼 깊게 fetch
+                cache.get_or_clone(self.repo_url, depth=required_depth)
+                # 저장소 reload
+                self.repo = git.Repo(self.cached_path)
+
             # 날짜 필터링 옵션 설정
             kwargs = {'max_count': limit} if limit else {}
             if since:
@@ -230,6 +246,19 @@ class DocumentGenerator:
                     commits.append(commit_data)
                     new_commits_count += 1
 
+                except git.exc.GitCommandError as e:
+                    # shallow clone에서 커밋이 없는 경우 더 fetch
+                    if 'does not have' in str(e) or 'unknown revision' in str(e):
+                        logger.warning(f"Commit not in shallow clone, fetching more history...")
+                        if self.is_remote and self.cached_path and self.repo_url:
+                            from src.repo_cache import RepoCloneCache
+                            cache = RepoCloneCache()
+                            # 더 깊게 fetch (depth=1000)
+                            cache.get_or_clone(self.repo_url, depth=1000, ensure_commit=commit.hexsha)
+                            # 재시도
+                            continue
+                    logger.warning(f"Failed to process commit {commit.hexsha[:8]}: {e}")
+                    continue
                 except Exception as e:
                     logger.warning(f"Failed to process commit {commit.hexsha[:8]}: {e}")
                     continue

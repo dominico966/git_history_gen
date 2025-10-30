@@ -2,7 +2,8 @@
 
 [![Tests](https://img.shields.io/badge/tests-100%25%20passing-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)]()
-[![License](https://img.shields.io/badge/license-MIT-blue)]()
+
+[//]: # ([![License]&#40;https://img.shields.io/badge/license-MIT-blue&#41;]&#40;&#41;)
 
 Git 저장소의 커밋 히스토리를 AI로 분석하는 대화형 도구입니다.
 
@@ -273,9 +274,10 @@ ChatGPT처럼 실시간으로 답변 생성
 4. Push to the Branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
-## 📄 라이선스
+[//]: # (## 📄 라이선스)
 
-MIT License - 자세한 내용은 [LICENSE](LICENSE) 파일 참조
+[//]: # ()
+[//]: # (MIT License - 자세한 내용은 [LICENSE]&#40;LICENSE&#41; 파일 참조)
 
 ## 🙏 감사의 말
 

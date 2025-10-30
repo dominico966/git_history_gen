@@ -105,50 +105,131 @@ class RepoCloneCache:
     def _configure_git_safe_directory(self):
         """
         Git safe.directory 설정 (Azure 환경 등에서 소유권 문제 방지)
+        - 이미 존재하는 항목은 중복 추가하지 않음
+        - '*'가 없으면 한 번만 추가
+        - 기존 중복 항목이 있다면 정리
         """
         try:
             import subprocess
 
-            # 모든 디렉토리를 안전한 것으로 설정
-            result = subprocess.run(
-                ['git', 'config', '--global', '--add', 'safe.directory', '*'],
-                capture_output=True,
-                timeout=5,
-                text=True
-            )
-
-            if result.returncode == 0:
-                logger.info("✓ Configured Git safe.directory for all repositories")
+            existing = self._get_safe_directories()
+            if '*' not in existing:
+                subprocess.run(
+                    ['git', 'config', '--global', '--add', 'safe.directory', '*'],
+                    capture_output=True,
+                    timeout=5,
+                    text=True,
+                    check=False,
+                )
+                logger.info("✓ Configured Git safe.directory: *")
             else:
-                logger.warning(f"Failed to configure safe.directory (non-critical): {result.stderr}")
+                logger.debug("safe.directory already contains '*'")
+
+            # 중복 정리 (모든 항목 대상, 순서 유지)
+            self._cleanup_safe_directory_duplicates()
 
         except FileNotFoundError:
             logger.warning("Git command not found, skipping safe.directory configuration")
         except Exception as e:
             logger.warning(f"Failed to configure safe.directory (non-critical): {e}")
 
+    def _get_safe_directories(self) -> list[str]:
+        """현재 설정된 safe.directory 목록을 반환"""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['git', 'config', '--global', '--get-all', 'safe.directory'],
+                capture_output=True,
+                timeout=5,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout:
+                entries = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                return entries
+        except Exception as e:
+            logger.debug(f"Failed to read safe.directory: {e}")
+        return []
+
+    def _cleanup_safe_directory_duplicates(self):
+        """safe.directory 항목 중복을 제거하고 유일 항목만 보존"""
+        try:
+            import subprocess
+            entries = self._get_safe_directories()
+            if not entries:
+                return
+
+            unique = []
+            seen = set()
+            for e in entries:
+                key = os.path.normcase(os.path.normpath(e)) if e != '*' else '*'
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(e)
+
+            if unique == entries:
+                return  # 이미 중복 없음
+
+            # 전체 항목 제거 후 유니크 항목만 재등록
+            subprocess.run(
+                ['git', 'config', '--global', '--unset-all', 'safe.directory'],
+                capture_output=True,
+                timeout=5,
+                text=True,
+                check=False,
+            )
+
+            for e in unique:
+                subprocess.run(
+                    ['git', 'config', '--global', '--add', 'safe.directory', e],
+                    capture_output=True,
+                    timeout=5,
+                    text=True,
+                    check=False,
+                )
+            logger.info(f"✓ Deduplicated safe.directory entries: {len(entries)} -> {len(unique)}")
+        except FileNotFoundError:
+            logger.debug("Git not found while deduplicating safe.directory")
+        except Exception as e:
+            logger.debug(f"Failed to deduplicate safe.directory: {e}")
+
     def _add_safe_directory(self, repo_path: str):
         """
         특정 저장소 경로를 Git safe.directory에 추가
-
+        - '*'가 이미 있으면 개별 경로 추가 불필요
+        - 동일 경로가 이미 있으면 중복 추가하지 않음
         Args:
             repo_path: 저장소 경로
         """
         try:
             import subprocess
 
+            entries = self._get_safe_directories()
+            # '*'가 있으면 모든 디렉토리 허용됨 → 스킵
+            if '*' in entries:
+                logger.debug("'*' present in safe.directory; skipping per-repo add")
+                return
+
+            # 경로 정규화로 중복 방지 (Windows 대소문자/슬래시 차이 보정)
+            target = os.path.normcase(os.path.normpath(repo_path))
+            normalized_set = {os.path.normcase(os.path.normpath(e)) for e in entries}
+
+            if target in normalized_set:
+                logger.debug(f"safe.directory already contains: {repo_path}")
+                return
+
             result = subprocess.run(
                 ['git', 'config', '--global', '--add', 'safe.directory', repo_path],
                 capture_output=True,
                 timeout=5,
-                text=True
+                text=True,
+                check=False,
             )
 
             if result.returncode == 0:
                 logger.info(f"✓ Added safe.directory: {repo_path}")
             else:
                 logger.debug(f"Failed to add safe.directory (non-critical): {result.stderr}")
-
         except FileNotFoundError:
             logger.debug("Git command not found")
         except Exception as e:
