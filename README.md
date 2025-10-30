@@ -3,9 +3,11 @@
 [![Tests](https://img.shields.io/badge/tests-100%25%20passing-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)]()
 
-[//]: # ([![License]&#40;https://img.shields.io/badge/license-MIT-blue&#41;]&#40;&#41;)
+[//]: # (License 문서가 현재 리포지토리에 없으므로 링크를 비활성화합니다)
 
 Git 저장소의 커밋 히스토리를 AI로 분석하는 대화형 도구입니다.
+
+- 🎬 라이브 데모(발표): https://ktds-edu.ddns.dominico966.net/
 
 ## ✨ 주요 기능
 
@@ -40,7 +42,7 @@ pip install -r requirements.txt
 AZURE_OPENAI_API_KEY=your-key
 AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2024-02-01
-AZURE_OPENAI_MODEL=gpt-4o-mini
+AZURE_OPENAI_MODEL=gpt-4.1-mini
 AZURE_OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 AZURE_SEARCH_ENDPOINT=https://your-search.search.windows.net
@@ -72,7 +74,7 @@ chainlit run src/chat_app.py
 ```
 User: "타우리 프로젝트 분석해줘"
 
-AI: 🔧 search_github_repository 실행 중...
+AI: 🔧 search_github_repo 실행 중...
     ✅ 'tauri-apps/tauri' 발견 (⭐ 85,234)
     
     🔧 set_current_repository 실행 중...
@@ -112,41 +114,43 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 ## 📊 프로젝트 현황
 
 - ✅ **59개 테스트 모두 통과** (100%) 🎉
-- ✅ **12개 도구 완전 구현**
-  - 저장소 관리 3개
-  - 커밋 분석 5개
-  - 온라인 읽기 4개
+- ✅ **18개 도구 완전 구현**
+  - 저장소/인덱스 관리 포함
+  - 커밋 분석/검색 전체 커버
+  - 온라인 읽기 도구 포함
 - ✅ **프로젝트 가이드 95% 준수**
 - ✅ **비용 최적화 완료**
 - ✅ **문서화 완료**
 
 ## 🛠️ 사용 가능한 도구 (18개)
 
-### 저장소 관리
-1. **get_current_repository** - 현재 저장소 확인
-2. **set_current_repository** - 저장소 변경
-3. **search_github_repository** - GitHub 검색
+### 저장소/검색/설정
+1. set_current_repository — 현재 저장소 설정
+2. get_commit_count — 저장소 커밋 개수(기간 필터 지원)
+3. search_github_repo — GitHub 저장소 검색
 
-### 커밋 분석
-4. **index_repository** - 커밋 인덱싱 (Azure AI Search)
-5. **get_commit_summary** - LLM 기반 요약
-6. **search_commits** - 하이브리드 검색 (텍스트 + 벡터)
-7. **analyze_contributors** - 기여자 분석
-8. **find_frequent_bug_commits** - 버그 커밋 탐지
+### 커밋 분석/검색
+4. index_repository — 커밋 인덱싱 (Azure AI Search)
+5. get_commit_summary — LLM 기반 요약
+6. search_commits — 하이브리드 검색 (텍스트 + 벡터)
+7. analyze_contributors — 기여자 분석
+8. find_bug_commits — 버그 커밋 탐지
+9. search_commits_by_date — 날짜 범위 커밋 검색
 
-### 인덱스 관리 (NEW! 🆕)
-9. **get_index_statistics** - 인덱스 통계 정보
-10. **list_indexed_repositories** - 인덱싱된 저장소 목록
-11. **get_repository_info** - 특정 저장소 상세 정보
-12. **delete_repository_commits** - 저장소 삭제
-13. **check_index_health** - 인덱스 상태 확인
+### 인덱스 관리
+10. get_index_statistics — 인덱스 통계 정보
+11. list_indexed_repositories — 인덱싱된 저장소 목록
+12. get_repository_info — 특정 저장소 상세 정보
+13. delete_repository_commits — 저장소 커밋 문서 삭제
+14. check_index_health — 인덱스 상태 확인
 
 ### 온라인 읽기
-14. **get_readme** - README 읽기
-15. **read_file_from_commit** - 특정 커밋 파일
-16. **get_file_context** - 파일 diff 및 컨텍스트
-17. **get_commit_diff** - 커밋 전체 diff
-18. **read_github_file** - GitHub URL 직접 읽기
+15. get_readme — README 읽기
+16. read_file_from_commit — 특정 커밋 파일 읽기
+17. get_file_context — 파일 diff 및 컨텍스트
+18. get_commit_diff — 커밋 전체 diff
+
+(참고: 기존 문서의 get_current_repository, read_github_file, search_github_repository 표기는 실제 구현 명칭과 달라 위와 같이 교정되었습니다.)
 
 ## 📚 문서
 
@@ -156,15 +160,14 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 - [🗄️ Azure AI Search Index 활용 가이드](docs/AZURE_SEARCH_INDEX_GUIDE.md) 🆕
 
 ### 프로젝트 정보
-- [🎯 프로젝트 완성 보고서](docs/PROJECT_COMPLETION_REPORT.md)
 - [📋 문서 인덱스](docs/00_INDEX.md)
-- [🧹 문서 정리 보고서](docs/PROJECT_CLEANUP_REPORT.md)
+- [🗂️ 발표 체크리스트](docs/PRESENTATION_CHECKLIST.md)
+- [🎬 데모 스크립트](docs/DEMO_SCRIPT.md)
+- [❓ Q&A 예상 질문](docs/QNA.md)
 
 ### 기술 문서
-- [🏗️ 프로젝트 구현](docs/PROJECT_IMPLEMENTATION.md)
-- [💰 비용 최적화](docs/COST_OPTIMIZATION.md)
-- [📦 다중 저장소 인덱싱](docs/MULTI_REPO_INDEXING_SUMMARY.md)
 - [🔧 온라인 읽기 도구](docs/ONLINE_READER_TOOLS.md)
+- [🧵 비동기/스트리밍 UI 분리](docs/ASYNC_UI_SEPARATION.md)
 
 ## 🧪 테스트
 
@@ -276,20 +279,18 @@ ChatGPT처럼 실시간으로 답변 생성
 
 [//]: # (## 📄 라이선스)
 
-[//]: # ()
-[//]: # (MIT License - 자세한 내용은 [LICENSE]&#40;LICENSE&#41; 파일 참조)
+[//]: # (라이선스 문서를 추가하면 여기 링크를 활성화하세요)
 
-## 🙏 감사의 말
-
-이 프로젝트는 다음 기술들을 사용합니다:
-- [Azure OpenAI](https://azure.microsoft.com/ko-kr/products/ai-services/openai-service)
-- [Azure AI Search](https://azure.microsoft.com/ko-kr/products/ai-services/ai-search)
-- [Chainlit](https://github.com/Chainlit/chainlit)
-- [GitPython](https://github.com/gitpython-developers/GitPython)
+## 🧩 운영(프로덕션) 참고: "읽어보기" 버튼만 보일 때
+- 대부분 WebSocket 미업그레이드(프록시 설정 누락) or 환경변수 미설정으로 on_chat_start 초기화 실패일 때 발생합니다.
+- 체크리스트
+  - 프록시에서 WebSocket 업그레이드 허용(Upgrade/Connection 헤더, 타임아웃/버퍼 크기)
+  - 체인릿 루트 경로 사용 시 서버 루트 경로 설정(root_path) 일치 여부
+  - AZURE_OPENAI/SEARCH 관련 환경변수 값 유효성 확인(엔드포인트/키/인덱스명)
+  - 브라우저 콘솔/네트워크 탭에서 /ws 연결 상태, 401/403/404 에러 존재 여부
 
 ---
 
 **제작**: AI Agent with GitHub Copilot  
-**최종 업데이트**: 2025-10-28  
+**최종 업데이트**: 2025-10-30  
 **프로젝트 상태**: ✅ Production Ready
-
