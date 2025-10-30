@@ -11,6 +11,8 @@ ICONS = [
     # 추가 아이콘 (헤더 링크 등)
     {"id": "1476",  "size": 32,  "name": "icon_db_1476_32.png"},
     {"id": "12599", "size": 32,  "name": "icon_github_12599_32.png"},
+    # 에이전트(봇) 아바타 아이콘 (Icons8 nolan 스타일)
+    {"id": "XiSP6YsZ9SZ0", "size": 80, "name": "avatar_agent_icons8_nolan_80.png"},
 ]
 
 BASE_URL = "https://img.icons8.com/"

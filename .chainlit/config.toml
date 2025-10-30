@@ -134,7 +134,7 @@ alert_style = "classic"
 logo_file = "/public/icons/logo_git_20906_100.png"
 
 # Load assistant avatar image from local file.
-default_avatar = "/public/icons/avatar_commit_33279_80.png"
+default_avatar = "/public/icons/avatar_agent_icons8_nolan_80.png"
 
 # Specify a custom build directory for the frontend.
 # This can be used to customize the frontend code.
