@@ -326,3 +326,15 @@ AI: [read_github_file 실행]
 
 **더 풍부하고 정확한 Git 히스토리 분석이 가능합니다!** 🚀✨
 
+# 온라인 리더 도구(요약)
+
+- `get_readme(repo_url)`: 원격 README 빠른 요약
+- `read_github_file(url)`: GitHub 단일 파일 직접 읽기
+- `read_file_from_commit(repo, sha, path)`: 특정 커밋의 파일 내용
+- `get_file_context(repo, sha, path)`: 변경 타입/주요 hunk 포함 컨텍스트
+- `get_commit_diff(repo, sha, max_files)`: 커밋 전체 diff(파일 최대 N개)
+
+팁
+- 짧은 SHA(7~10자리)도 자동 해석 시도
+- shallow 상태면 자동 deepen 후 재시도
+- 출력이 큰 경우 일부만 요약하여 표시
