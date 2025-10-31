@@ -9,9 +9,10 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "20"))
 EMBEDDING_MODEL = os.getenv("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+VECTOR_DIMENSIONS = int(os.getenv("AZURE_EMBEDDING_DIMENSIONS", "1536"))
 
 # 임베딩 모델 로드 확인
-logger.info(f"Using embedding model: {EMBEDDING_MODEL}")
+logger.info(f"Using embedding model: {EMBEDDING_MODEL} (dimensions: {VECTOR_DIMENSIONS})")
 
 
 async def embed_texts_async(texts: List[str], openai_client: AzureOpenAI) -> List[List[float]]:

@@ -21,7 +21,7 @@ from azure.search.documents.indexes.models import (
 )
 from openai import AzureOpenAI
 from src.document_generator import DocumentGenerator
-from src.embedding import embed_texts
+from src.embedding import embed_texts, VECTOR_DIMENSIONS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,8 +37,13 @@ def normalize_repo_identifier(repo_path: str) -> str:
     Returns:
         str: 정규화된 저장소 식별자 (해시값)
     """
-    # URL인 경우
-    if repo_path.startswith(('http://', 'https://', 'git://', 'ssh://')):
+    # git@ 형식의 SSH URL 처리 (예: git@github.com:user/repo.git)
+    if repo_path.startswith('git@'):
+        # git@github.com:user/repo.git -> github.com/user/repo 형식으로 변환
+        parts = repo_path.replace('git@', '').replace(':', '/')
+        normalized = parts.rstrip('/').removesuffix('.git').lower()
+    # 일반 URL인 경우 (http://, https://, git://, ssh://)
+    elif repo_path.startswith(('http://', 'https://', 'git://', 'ssh://')):
         parsed = urlparse(repo_path)
         # 스킴과 netloc, path를 사용하여 정규화
         # .git 확장자 제거
@@ -47,8 +52,13 @@ def normalize_repo_identifier(repo_path: str) -> str:
     else:
         # 로컬 경로인 경우
         # 절대 경로로 변환하고 정규화
-        abs_path = Path(repo_path).resolve()
-        normalized = str(abs_path).lower()
+        try:
+            abs_path = Path(repo_path).resolve()
+            normalized = str(abs_path).lower()
+        except Exception as e:
+            # 경로 변환 실패 시 원본 사용
+            logger.warning(f"Failed to resolve path '{repo_path}': {e}, using original")
+            normalized = repo_path.lower()
 
     # SHA-256 해시로 변환 (짧은 버전 사용)
     hash_obj = hashlib.sha256(normalized.encode('utf-8'))
@@ -80,13 +90,15 @@ class CommitIndexer:
         self.openai_client = openai_client
         self.index_name = index_name
 
-    def create_index_if_not_exists(self, vector_dimensions: int = 1536) -> None:
+    def create_index_if_not_exists(self, vector_dimensions: int = None) -> None:
         """
         인덱스가 없으면 생성합니다.
 
         Args:
-            vector_dimensions: 임베딩 벡터 차원 (기본값: 1536 for text-embedding-3-small)
+            vector_dimensions: 임베딩 벡터 차원 (기본값: VECTOR_DIMENSIONS from embedding.py)
         """
+        if vector_dimensions is None:
+            vector_dimensions = VECTOR_DIMENSIONS
         try:
             # 인덱스가 이미 존재하는지 확인
             try:

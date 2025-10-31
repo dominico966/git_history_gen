@@ -25,15 +25,25 @@ def normalize_repo_identifier(repo_path: str) -> str:
     from urllib.parse import urlparse
     from pathlib import Path
 
-    # URL인 경우
-    if repo_path.startswith(('http://', 'https://', 'git://', 'ssh://')):
+    # git@ 형식의 SSH URL 처리 (예: git@github.com:user/repo.git)
+    if repo_path.startswith('git@'):
+        # git@github.com:user/repo.git -> github.com/user/repo 형식으로 변환
+        parts = repo_path.replace('git@', '').replace(':', '/')
+        normalized = parts.rstrip('/').removesuffix('.git').lower()
+    # 일반 URL인 경우 (http://, https://, git://, ssh://)
+    elif repo_path.startswith(('http://', 'https://', 'git://', 'ssh://')):
         parsed = urlparse(repo_path)
         path = parsed.path.rstrip('/').removesuffix('.git')
         normalized = f"{parsed.scheme}://{parsed.netloc}{path}".lower()
     else:
         # 로컬 경로인 경우
-        abs_path = Path(repo_path).resolve()
-        normalized = str(abs_path).lower()
+        try:
+            abs_path = Path(repo_path).resolve()
+            normalized = str(abs_path).lower()
+        except Exception as e:
+            # 경로 변환 실패 시 원본 사용
+            logger.warning(f"Failed to resolve path '{repo_path}': {e}, using original")
+            normalized = repo_path.lower()
 
     # SHA-256 해시로 변환
     hash_obj = hashlib.sha256(normalized.encode('utf-8'))
