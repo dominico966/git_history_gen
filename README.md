@@ -105,7 +105,7 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 ## 🔧 기술 스택
 
 - **Python 3.13+**
-- **Azure OpenAI** (GPT-4o-mini, text-embedding-3-small)
+- **Azure OpenAI** (GPT-4.1-mini, text-embedding-3-small)
 - **Azure AI Search** (하이브리드 벡터 검색)
 - **Chainlit** (대화형 UI)
 - **GitPython** (Git 저장소 분석)
