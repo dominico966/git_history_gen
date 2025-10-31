@@ -46,8 +46,9 @@ allow_thread_sharing = false
 reaction_on_message_received = false
 
 # Authorize users to spontaneously upload files with messages
+# 멀티모달을 지원하지 않으므로 파일 업로드 비활성화
 [features.spontaneous_file_upload]
-    enabled = true
+    enabled = false
     # Define accepted file types using MIME types
     # Examples:
     # 1. For specific file types:

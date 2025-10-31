@@ -162,11 +162,15 @@ Chainlit UI → Agent → Tools → Document Generator → Azure Services
 - [⚡ 빠른 실행 가이드](CHAINLIT_QUICKSTART.md)
 - [🗄️ Azure AI Search Index 활용 가이드](docs/AZURE_SEARCH_INDEX_GUIDE.md)
 
-### 프로젝트 정보
-- [🗂️ 발표 체크리스트](docs/PRESENTATION_CHECKLIST.md)
-- [🎬 데모 스크립트](docs/DEMO_SCRIPT.md)
-- [❓ Q&A 예상 질문](docs/QNA.md)
-- [🏁 평가 대응 브리프](docs/EVALUATION_BRIEF.md)
+[//]: # (### 프로젝트 정보)
+
+[//]: # (- [🗂️ 발표 체크리스트]&#40;docs/PRESENTATION_CHECKLIST.md&#41;)
+
+[//]: # (- [🎬 데모 스크립트]&#40;docs/DEMO_SCRIPT.md&#41;)
+
+[//]: # (- [❓ Q&A 예상 질문]&#40;docs/QNA.md&#41;)
+
+[//]: # (- [🏁 평가 대응 브리프]&#40;docs/EVALUATION_BRIEF.md&#41;)
 
 ### 기술 문서
 - [🔧 온라인 읽기 도구](docs/ONLINE_READER_TOOLS.md)
